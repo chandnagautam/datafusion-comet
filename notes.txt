@@ -1,0 +1,10 @@
+1. Write new shuffle manager
+2. Register shuffle create lifecycle manager and keep the rest of the things same
+3. In write, return celeborn rss writers which will have reference to the the client that needs to be used.
+4. When native method is called pass the parition writer object to those methods and have them to be controlled when writing needs to be done.
+5. In native code, let it do the rest of things the way it does, only when it comes to spill and write, just write the data to celeborn.
+
+6. After all this, start dealing with the reader
+
+7. Handle cleaning up of failed shuffle ids instead of waiting for unregister shuffle to be called for cleanup
+8. Look at other things too, that celeborn spark shuffle manager does for lifecycle registration callback
