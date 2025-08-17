@@ -50,7 +50,7 @@ final class CometCelebornBypassMergeSortWriter<K, V> extends ShuffleWriter<K, V>
 
     private long[] partitionLengths;
 
-    private boolean stopping;
+    private boolean stopping = false;
 
     private MapStatus mapStatus;
 
@@ -133,54 +133,68 @@ final class CometCelebornBypassMergeSortWriter<K, V> extends ShuffleWriter<K, V>
     public void write(Iterator<Product2<K, V>> records) throws IOException {
         assert (partitionWriters == null);
 
-        try {
-            if (!records.hasNext()) {
-                BlockManagerId bmId = SparkEnv.get().blockManager().shuffleServerId();
-                mapStatus = SparkUtils.createMapStatus(bmId, partitionLengths, mapId);
+        if (!records.hasNext()) {
+            BlockManagerId bmId = SparkEnv.get().blockManager().shuffleServerId();
+            mapStatus = SparkUtils.createMapStatus(bmId, partitionLengths, mapId);
 
-                return;
-            }
-            final long openStartTime = System.nanoTime();
-            partitionWriters = new CometCelebornWriter[partitionNum];
-
-            allocator = CometShuffleMemoryAllocator.getInstance(conf, memoryManager,
-                    Math.min(CometShuffleExternalSorter.MAXIMUM_PAGE_SIZE_BYTES, memoryManager.pageSizeBytes()));
-            for (int i = 0; i < partitionNum; i++) {
-                CometCelebornWriter writer = new CometCelebornWriter(shuffleClient, allocator, taskContext, serializer,
-                        schema, writeMetrics, isAsync, asyncThreadNum, threadPool, tracingEnabled);
-                partitionWriters[i] = writer;
-            }
-
-            writeMetrics.incWriteTime(System.nanoTime() - openStartTime);
-
-            long outputRows = 0;
-
-            while (records.hasNext()) {
-                outputRows += 1;
-
-                final Product2<K, V> record = records.next();
-
-                final K key = record._1();
-
-                int partitionId = partitioner.getPartition(key);
-
-                partitionWriters[partitionId].insertRow((UnsafeRow) record._2(), partitionId);
-
-            }
-
-            Native _native = new Native();
-            if (tracingEnabled) {
-                _native.logMemoryUsage("comet_shuffle_", allocator.getUsed());
-            }
-
-            long spillRecords = 0;
-
-            for (int i = 0; i < partitionNum; i++) {
-                CometCelebornWriter writer = partitionWriters[i];
-            }
-
-        } catch (Exception e) {
-            // TODO: handle exception
+            return;
         }
+        final long openStartTime = System.nanoTime();
+        partitionWriters = new CometCelebornWriter[partitionNum];
+
+        allocator = CometShuffleMemoryAllocator.getInstance(conf, memoryManager,
+                Math.min(CometShuffleExternalSorter.MAXIMUM_PAGE_SIZE_BYTES, memoryManager.pageSizeBytes()));
+        for (int i = 0; i < partitionNum; i++) {
+            CometCelebornWriter writer = new CometCelebornWriter(shuffleClient, allocator, taskContext, serializer,
+                    schema, writeMetrics, isAsync, asyncThreadNum, threadPool, tracingEnabled);
+            partitionWriters[i] = writer;
+        }
+
+        writeMetrics.incWriteTime(System.nanoTime() - openStartTime);
+
+        long outputRows = 0;
+
+        while (records.hasNext()) {
+            outputRows += 1;
+
+            final Product2<K, V> record = records.next();
+
+            final K key = record._1();
+
+            int partitionId = partitioner.getPartition(key);
+
+            partitionWriters[partitionId].insertRow((UnsafeRow) record._2(), partitionId);
+
+        }
+
+        Native _native = new Native();
+        if (tracingEnabled) {
+            _native.logMemoryUsage("comet_shuffle_", allocator.getUsed());
+        }
+
+        long spillRecords = 0;
+
+        for (int i = 0; i < partitionNum; i++) {
+            CometCelebornWriter writer = partitionWriters[i];
+
+            writer.close();
+
+            spillRecords += writer.getOutputRecords();
+        }
+
+        if (tracingEnabled) {
+            _native.logMemoryUsage("comet_shuffle_", allocator.getUsed());
+        }
+
+        if (outputRows != spillRecords) {
+            throw new RuntimeException(
+                    "outputRows("
+                            + outputRows
+                            + ") != spillRecords("
+                            + spillRecords
+                            + "). Please file a bug report.");
+        }
+        BlockManagerId bmid = SparkEnv.get().blockManager().blockManagerId();
+        mapStatus = SparkUtils.createMapStatus(bmid, partitionLengths, mapId);
     }
 }
