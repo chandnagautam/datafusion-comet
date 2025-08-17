@@ -72,6 +72,7 @@ under the License.
     <scalatest-maven-plugin.version>2.2.0</scalatest-maven-plugin.version>
     <spark.version>3.5.7</spark.version>
     <spark.version.short>3.5</spark.version.short>
+    <spark.major.version>3</spark.major.version>
     <spark.maven.scope>provided</spark.maven.scope>
     <protobuf.version>3.25.5</protobuf.version>
     <parquet.version>1.13.1</parquet.version>
@@ -86,6 +87,7 @@ under the License.
     <guava.version>33.2.1-jre</guava.version>
     <testcontainers.version>1.21.0</testcontainers.version>
     <amazon-awssdk-v2.version>2.31.51</amazon-awssdk-v2.version>
+    <celeborn.version>0.6.0</celeborn.version>
     <jni.dir>${project.basedir}/../native/target/debug</jni.dir>
     <platform>darwin</platform>
     <arch>x86_64</arch>
@@ -273,6 +275,24 @@ under the License.
         <artifactId>slf4j-api</artifactId>
         <version>${slf4j.version}</version>
         <scope>${spark.maven.scope}</scope>
+      </dependency>
+
+      <!-- Celeborn dependency -->
+      <dependency>
+        <groupId>org.apache.celeborn</groupId>
+        <artifactId>celeborn-client-spark-${spark.major.version}-shaded_${scala.binary.version}</artifactId>
+        <version>${celeborn.version}</version>
+        <scope>provided</scope>
+        <exclusions>
+          <exclusion>
+            <groupId>org.apache.celeborn</groupId>
+            <artifactId>celeborn-client-spark-${spark.major.version}_${scala.binary.version}</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>org.apache.celeborn</groupId>
+            <artifactId>celeborn-spark-${spark.major.version}-columnar-shuffle_${scala.binary.version}</artifactId>
+          </exclusion>
+        </exclusions>
       </dependency>
 
       <!-- Shaded deps marked as provided. These are promoted to compile scope
@@ -629,6 +649,7 @@ under the License.
         <scala.binary.version>2.13</scala.binary.version>
         <spark.version>4.0.1</spark.version>
         <spark.version.short>4.0</spark.version.short>
+        <spark.major.version>4</spark.major.version>
         <parquet.version>1.15.2</parquet.version>
         <semanticdb.version>4.13.6</semanticdb.version>
         <slf4j.version>2.0.16</slf4j.version>
@@ -1123,6 +1144,14 @@ under the License.
                         <ignoreClass>com.google.thirdparty.publicsuffix.TrieParser</ignoreClass>
                         <ignoreClass>com.google.thirdparty.publicsuffix.PublicSuffixPatterns</ignoreClass>
                         <ignoreClass>com.google.thirdparty.publicsuffix.PublicSuffixType</ignoreClass>
+                      </ignoreClasses>
+                    </dependency>
+                    <dependency>
+                      <groupId>org.apache.celeborn</groupId>
+                      <artifactId>celeborn-client-spark-${spark.major.version}-shaded_${scala.binary.version}</artifactId>
+                      <ignoreClasses>
+                        <ignoreClass>org.apache.spark.sql.execution.columnar.ByteBufferHelper</ignoreClass>
+                        <ignoreClass>org.apache.spark.sql.execution.columnar.ByteBufferHelper$</ignoreClass>
                       </ignoreClasses>
                     </dependency>
                   </dependencies>
