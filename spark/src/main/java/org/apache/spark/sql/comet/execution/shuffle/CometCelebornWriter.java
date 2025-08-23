@@ -273,7 +273,7 @@ public class CometCelebornWriter {
         spilling = false;
     }
 
-    private class CelebornArrowIPCWriter extends ArrowIPCWriter {
+    private class CelebornArrowIPCWriter extends CelebornSpillWriter {
         private final RowPartition rowPartition;
 
         CelebornArrowIPCWriter() {
@@ -284,6 +284,29 @@ public class CometCelebornWriter {
 
             this.nativeLib = CometCelebornWriter.this.nativeLib;
             this.dataTypes = serializeSchema(schema);
+            this.shuffleClient = CometCelebornWriter.this.shuffleClient;
+        }
+
+        int numRecords() {
+            return rowPartition.getNumRows();
+        }
+
+        /** Inserts a record into current allocated page. */
+        void insertRecord(Object recordBase, long recordOffset, int length) {
+            // This `ArrowIPCWriter` could be spilled by other threads, so we need to
+            // synchronize it.
+            final Object base = currentPage.getBaseObject();
+
+            // Add row addresses
+            final long recordAddress = allocator.encodePageNumberAndOffset(currentPage, pageCursor);
+            rowPartition.addRow(allocator.getOffsetInPage(recordAddress) + uaoSize + 4, length - 4);
+
+            // Write the record (row) size
+            UnsafeAlignedOffset.putSize(base, pageCursor, length);
+            pageCursor += uaoSize;
+            // Copy the record (row) data from serialized buffer to page
+            Platform.copyMemory(recordBase, recordOffset, base, pageCursor, length);
+            pageCursor += length;
         }
 
         @Override
@@ -314,12 +337,11 @@ public class CometCelebornWriter {
             }
         }
 
-        @Override
         long doSpilling(boolean isLast) throws IOException {
             final ShuffleWriteMetricsReporter writeMetricsToUse = writeMetrics;
 
             outputRecords += rowPartition.getNumRows();
-            final long written = doSpilling(dataTypes, shuffleClient, rowPartition, writeMetricsToUse,
+            final long written = doSpilling(dataTypes, rowPartition, writeMetricsToUse,
                     preferDictionaryRatio, compressionCodec, compressionLevel, tracingEnabled);
 
             synchronized (writeMetrics) {
@@ -329,36 +351,6 @@ public class CometCelebornWriter {
             }
 
             return written;
-        }
-
-        protected long doSpilling(
-                byte[][] dataTypes,
-                ShuffleClient client,
-                RowPartition rowPartition,
-                ShuffleWriteMetricsReporter writeMetricsToUse,
-                double preferDictionaryRatio,
-                String compressionCodec,
-                int compressionLevel,
-                boolean tracingEnabled) {
-            long[] addresses = rowPartition.getRowAddreses();
-            int[] sizes = rowPartition.getRowSizes();
-
-            long start = System.nanoTime();
-
-            int batchSize = (int) CometConf.COMET_COLUMNAR_SHUFFLE_BATCH_SIZE().get();
-
-            long result = nativeLib.writeToCeleborn(addresses, sizes, dataTypes, shuffleClient,
-                    preferDictionaryRatio, batchSize, compressionCodec, compressionLevel, tracingEnabled);
-
-            rowPartition.reset();
-
-            synchronized (writeMetricsToUse) {
-                writeMetricsToUse.incWriteTime(System.nanoTime() - start);
-                writeMetricsToUse.incRecordsWritten(addresses.length);
-                writeMetricsToUse.incBytesWritten(result);
-            }
-
-            return result;
         }
     }
 
