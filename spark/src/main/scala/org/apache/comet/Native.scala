@@ -23,6 +23,7 @@ import java.nio.ByteBuffer
 
 import org.apache.spark.CometTaskMemoryManager
 import org.apache.spark.sql.comet.CometMetricNode
+import org.apache.celeborn.client.ShuffleClient
 
 import org.apache.comet.parquet.CometFileKeyUnwrapper
 
@@ -202,4 +203,21 @@ class Native extends NativeBase {
    */
   @native def logMemoryUsage(name: String, memoryUsageBytes: Long): Unit
 
+
+  @native def writeToCeleborn(
+      addresses: Array[Long],
+      rowSizes: Array[Int],
+      datatypes: Array[Array[Byte]],
+      shuffleClient: ShuffleClient,
+      preferDictionaryRatio: Double,
+      batchSize: Int,
+      compressionCodec: String,
+      compressionLevel: Int,
+      tracingEnabled: Boolean,
+      shuffleId: Int,
+      mapId: Int,
+      attemptId: Int,
+      partitionId: Int,
+      mappersNum: Int,
+      partitioNum: Int): Array[Long]
 }

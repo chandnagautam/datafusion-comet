@@ -27,6 +27,7 @@ use crate::{
         },
         utils::bytes_to_i128,
     },
+    jvm_bridge::{jni_call, JVMClasses},
 };
 use arrow::array::{
     builder::{
@@ -42,7 +43,10 @@ use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::error::ArrowError;
 use datafusion::physical_plan::metrics::Time;
-use jni::sys::{jint, jlong};
+use jni::{
+    objects::{GlobalRef, JObject},
+    sys::{jint, jlong},
+};
 use std::{
     fs::OpenOptions,
     io::{Cursor, Seek, SeekFrom, Write},
@@ -904,6 +908,111 @@ fn make_batch(arrays: Vec<ArrayRef>, row_count: usize) -> Result<RecordBatch, Ar
     let schema = Arc::new(Schema::new(fields));
     let options = RecordBatchOptions::new().with_row_count(Option::from(row_count));
     RecordBatch::try_new_with_options(schema, arrays, &options)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn process_sorted_row_partition_for_celeborn(
+    row_num: usize,
+    batch_size: usize,
+    row_addresses_ptr: *mut jlong,
+    row_sizes_ptr: *mut jint,
+    schema: &[DataType],
+    shuffle_client: Arc<GlobalRef>,
+    prefer_dictionary_ratio: f64,
+    codec: &CompressionCodec,
+    shuffle_id: jint,
+    map_id: jint,
+    attempt_id: jint,
+    partition_id: jint,
+    mappers_num: jint,
+    partition_num: jint,
+) -> Result<i64, CometError> {
+    let row_step = 10;
+
+    let mut current_row: usize = 0;
+
+    let mut written = 0;
+
+    while current_row < row_num {
+        let n = std::cmp::min(batch_size, row_num - current_row);
+
+        let mut data_builders: Vec<Box<dyn ArrayBuilder>> = vec![];
+        schema.iter().try_for_each(|dt| {
+            make_builders(dt, n, prefer_dictionary_ratio)
+                .map(|builder| data_builders.push(builder))?;
+            Ok::<(), CometError>(())
+        })?;
+
+        let mut row_start = current_row;
+
+        while row_start < current_row + n {
+            let row_end = std::cmp::min(row_start + row_step, current_row + n);
+
+            for (idx, builder) in data_builders.iter_mut().enumerate() {
+                append_columns(
+                    row_addresses_ptr,
+                    row_sizes_ptr,
+                    row_start,
+                    row_end,
+                    schema,
+                    idx,
+                    builder,
+                    prefer_dictionary_ratio,
+                )?;
+            }
+
+            row_start = row_end;
+        }
+
+        let array_refs: Result<Vec<ArrayRef>, _> = data_builders
+            .iter_mut()
+            .zip(schema.iter())
+            .map(|(builder, datatype)| builder_to_array(builder, datatype, prefer_dictionary_ratio))
+            .collect();
+
+        let batch = make_batch(array_refs?, n)?;
+
+        let mut frozen: Vec<u8> = vec![];
+
+        let mut cursor = Cursor::new(&mut frozen);
+
+        cursor.seek(SeekFrom::End(0))?;
+
+        let ipc_time = Time::default();
+        let block_writer = ShuffleBlockWriter::try_new(batch.schema().as_ref(), codec.clone())?;
+
+        written += block_writer.write_batch(&batch, &mut cursor, &ipc_time)?;
+
+        let mut env = JVMClasses::get_env()?;
+
+        unsafe {
+            // let mut buffer = env.new_byte_array(frozen.len() as i32)?;
+
+            //let frozen_ptr = frozen.as_ptr() as *const i8;
+            //let frozen_ref = std::slice::from_raw_parts(frozen_ptr, frozen.len());
+
+            //env.set_byte_array_region(&buffer, 0, frozen_ref)?;
+
+            let frozen_ref = frozen.as_slice();
+
+            let buffer: JObject = env
+                .new_direct_byte_buffer(
+                    frozen_ref.get_unchecked(0) as *const u8 as *mut u8,
+                    frozen.len(),
+                )?
+                .into();
+
+            let handle = shuffle_client.as_obj();
+            jni_call!(&mut env,
+              celeborn_shuffle_client(handle).push_data(shuffle_id, map_id, attempt_id, partition_id,
+                    &buffer, 0 as i32, frozen.len() as i64, mappers_num, partition_num) -> i64);
+            todo!("Handle freeing the buffer allocated with JVM")
+        }
+
+        current_row += n;
+    }
+
+    Ok(written as i64)
 }
 
 #[cfg(test)]

@@ -21,8 +21,11 @@ use super::{serde, utils::SparkArrowConvert};
 use crate::{
     errors::{try_unwrap_or_throw, CometError, CometResult},
     execution::{
-        metrics::utils::update_comet_metric, planner::PhysicalPlanner, serde::to_arrow_datatype,
-        shuffle::row::process_sorted_row_partition, sort::RdxSort,
+        metrics::utils::update_comet_metric,
+        planner::PhysicalPlanner,
+        serde::to_arrow_datatype,
+        shuffle::row::{process_sorted_row_partition, process_sorted_row_partition_for_celeborn},
+        sort::RdxSort,
     },
     jvm_bridge::{jni_new_global_ref, JVMClasses},
 };
@@ -810,5 +813,81 @@ pub unsafe extern "system" fn Java_org_apache_comet_Native_logMemoryUsage(
         let name: String = env.get_string(&JString::from_raw(name)).unwrap().into();
         log_memory_usage(&name, value as u64);
         Ok(())
+    })
+}
+
+#[no_mangle]
+/// # Safety
+/// This function is inherently unsafe since it deals with raw pointers passed from JNI.
+pub unsafe extern "system" fn Java_org_apache_comet_Native_writeToCeleborn(
+    e: JNIEnv,
+    _class: JClass,
+    row_addresses: jlongArray,
+    row_sizes: jintArray,
+    serialized_datatypes: jobjectArray,
+    shuffle_client: JObject,
+    prefer_dictionary_ratio: jdouble,
+    batch_size: jlong,
+    compression_codec: jstring,
+    compression_level: jint,
+    tracing_enabled: jboolean,
+    shuffle_id: jint,
+    map_id: jint,
+    attempt_id: jint,
+    partition_id: jint,
+    mappers_num: jint,
+    partition_num: jint,
+) -> jlong {
+    try_unwrap_or_throw(&e, |mut env| unsafe {
+        with_trace("writeToCeleborn", tracing_enabled != JNI_FALSE, || {
+            JVMClasses::init(&mut env);
+
+            let data_types = convert_datatype_arrays(&mut env, serialized_datatypes)?;
+
+            let row_address_array = JLongArray::from_raw(row_addresses);
+            let row_num = env.get_array_length(&row_address_array)? as usize;
+
+            let row_addresses =
+                env.get_array_elements(&row_address_array, ReleaseMode::NoCopyBack)?;
+
+            let row_size_array = JIntArray::from_raw(row_sizes);
+            let row_sizes = env.get_array_elements(&row_size_array, ReleaseMode::NoCopyBack)?;
+
+            let row_addresses_ptr = row_addresses.as_ptr();
+            let row_sizes_ptr = row_sizes.as_ptr();
+
+            let compression_codec: String = env
+                .get_string(&JString::from_raw(compression_codec))
+                .unwrap()
+                .into();
+
+            let compression_codec = match compression_codec.as_str() {
+                "zstd" => CompressionCodec::Zstd(compression_level),
+                "lz4" => CompressionCodec::Lz4Frame,
+                "snappy" => CompressionCodec::Snappy,
+                _ => CompressionCodec::Lz4Frame,
+            };
+
+            let shuffle_client = Arc::new(jni_new_global_ref!(env, shuffle_client)?);
+
+            let written_bytes = process_sorted_row_partition_for_celeborn(
+                row_num,
+                batch_size as usize,
+                row_addresses_ptr,
+                row_sizes_ptr,
+                &data_types,
+                shuffle_client,
+                prefer_dictionary_ratio,
+                &compression_codec,
+                shuffle_id,
+                map_id,
+                attempt_id,
+                partition_id,
+                mappers_num,
+                partition_num,
+            )?;
+
+            Ok(written_bytes)
+        })
     })
 }

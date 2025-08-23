@@ -19,6 +19,7 @@
 
 use crate::errors::CometResult;
 
+use celeborn_shuffle_client::CelebornShuffleClient;
 use jni::objects::JClass;
 use jni::{
     errors::Error,
@@ -26,6 +27,7 @@ use jni::{
     signature::ReturnType,
     AttachGuard, JNIEnv,
 };
+use jni_store::JniStore;
 use once_cell::sync::OnceCell;
 
 /// Macro for converting JNI Error to Comet Error.
@@ -174,6 +176,8 @@ pub use comet_exec::*;
 mod batch_iterator;
 mod comet_metric_node;
 mod comet_task_memory_manager;
+mod celeborn_shuffle_client;
+mod jni_store;
 
 use crate::{errors::CometError, JAVA_VM};
 use batch_iterator::CometBatchIterator;
@@ -207,6 +211,13 @@ pub struct JVMClasses<'a> {
     /// The CometTaskMemoryManager used for interacting with JVM side to
     /// acquire & release native memory.
     pub comet_task_memory_manager: CometTaskMemoryManager<'a>,
+
+    /// Celeborn shuffle client for pushing to Celeborn RSS
+    pub celeborn_shuffle_client: CelebornShuffleClient<'a>,
+
+    /// Jni store to access object needed for native execution
+    /// This will be used to get the shuffle clients for external RSS
+    pub jni_store: JniStore<'a>,
 }
 
 unsafe impl Send for JVMClasses<'_> {}
@@ -258,6 +269,7 @@ impl JVMClasses<'_> {
                 comet_exec: CometExec::new(env).unwrap(),
                 comet_batch_iterator: CometBatchIterator::new(env).unwrap(),
                 comet_task_memory_manager: CometTaskMemoryManager::new(env).unwrap(),
+                celeborn_shuffle_client: CelebornShuffleClient::new(env).unwrap(),
             }
         });
     }

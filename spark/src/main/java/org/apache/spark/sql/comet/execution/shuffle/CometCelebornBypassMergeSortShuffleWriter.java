@@ -32,6 +32,7 @@ import scala.Option;
 import scala.Product2;
 import scala.Tuple2;
 import scala.collection.Iterator;
+import scala.util.control.Exception.Finally;
 
 final class CometCelebornBypassMergeSortWriter<K, V> extends ShuffleWriter<K, V> {
     private static Logger logger = LoggerFactory.getLogger(CometCelebornBypassMergeSortWriter.class);
@@ -103,30 +104,34 @@ final class CometCelebornBypassMergeSortWriter<K, V> extends ShuffleWriter<K, V>
 
     @Override
     public Option<MapStatus> stop(boolean success) {
-        if (stopping) {
-            return None$.empty();
-        } else {
-            stopping = true;
-
-            if (success) {
-                if (mapStatus == null) {
-                    throw new IllegalStateException("Cannot call stop(true) without having called write()")
-                }
-
-                return Option.apply(mapStatus);
+        try {
+            if (stopping) {
+                return None$.empty();
             } else {
-                if (partitionWriters != null) {
-                    try {
-                        for (CometCelebornWriter writer : partitionWriters) {
-                            writer.freeMemory();
+                stopping = true;
+
+                if (success) {
+                    if (mapStatus == null) {
+                        throw new IllegalStateException("Cannot call stop(true) without having called write()");
+                    }
+
+                    return Option.apply(mapStatus);
+                } else {
+                    if (partitionWriters != null) {
+                        try {
+                            for (CometCelebornWriter writer : partitionWriters) {
+                                writer.freeMemory();
+                            }
+                        } finally {
+                            partitionWriters = null;
                         }
-                    } finally {
-                        partitionWriters = null;
                     }
                 }
             }
+            return None$.empty();
+        } finally {
+            shuffleClient.cleanup(celebornShuffleId.intValue(), mapId.intValue(), taskContext.attemptNumber());
         }
-        return None$.empty();
     }
 
     @Override
@@ -194,7 +199,14 @@ final class CometCelebornBypassMergeSortWriter<K, V> extends ShuffleWriter<K, V>
                             + spillRecords
                             + "). Please file a bug report.");
         }
+        Long celebornWriteStart = System.nanoTime();
+        shuffleClient.prepareForMergeData(celebornShuffleId.intValue(), mapId.intValue(),
+                taskContext.attemptNumber());
+        shuffleClient.pushMergedData(celebornShuffleId.intValue(), mapId.intValue(), taskContext.attemptNumber());
+        shuffleClient.mapperEnd(celebornShuffleId.intValue(), mapId.intValue(), taskContext.attemptNumber(),
+                partitionNum);
         BlockManagerId bmid = SparkEnv.get().blockManager().blockManagerId();
         mapStatus = SparkUtils.createMapStatus(bmid, partitionLengths, mapId);
+        writeMetrics.incWriteTime(System.nanoTime() - celebornWriteStart);
     }
 }

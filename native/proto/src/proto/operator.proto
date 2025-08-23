@@ -48,6 +48,7 @@ message Operator {
     HashJoin hash_join = 109;
     Window window = 110;
     NativeScan native_scan = 111;
+    CelebornShuffleWriter celeborn_shuffle_writer = 112;
   }
 }
 
@@ -247,4 +248,12 @@ message Window {
   repeated spark.spark_expression.Expr order_by_list = 2;
   repeated spark.spark_expression.Expr partition_by_list = 3;
   Operator child = 4;
+}
+
+message CelebornShuffleWriter {
+  spark.spark_partitioning.Partitioning partitioning = 1;
+  string object_retrieval_id = 2;
+  CompressionCodec codec = 3;
+  int32 compression_level = 4;
+  bool tracing_enabled = 5;
 }
