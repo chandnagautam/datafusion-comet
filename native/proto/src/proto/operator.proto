@@ -256,4 +256,9 @@ message CelebornShuffleWriter {
   CompressionCodec codec = 3;
   int32 compression_level = 4;
   bool tracing_enabled = 5;
+  int32 shuffle_id = 6;
+  int32 map_id = 7;
+  int32 num_partitions = 8;
+  int32 num_mappers = 9;
+  int32 attempt_id = 10;
 }

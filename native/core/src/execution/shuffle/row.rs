@@ -995,6 +995,9 @@ pub fn process_sorted_row_partition_for_celeborn(
 
             let frozen_ref = frozen.as_slice();
 
+            // TODO: move this to auto local to ensure drop of it after scope
+            // instead of doing it here. Consider moving this to a common macro which
+            // would return the required type once the work is done
             let buffer: JObject = env
                 .new_direct_byte_buffer(
                     frozen_ref.get_unchecked(0) as *const u8 as *mut u8,
@@ -1006,7 +1009,9 @@ pub fn process_sorted_row_partition_for_celeborn(
             jni_call!(&mut env,
               celeborn_shuffle_client(handle).push_data(shuffle_id, map_id, attempt_id, partition_id,
                     &buffer, 0 as i32, frozen.len() as i64, mappers_num, partition_num) -> i64);
-            todo!("Handle freeing the buffer allocated with JVM")
+
+            // free JVM reference
+            env.delete_local_ref(buffer);
         }
 
         current_row += n;

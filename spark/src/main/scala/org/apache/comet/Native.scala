@@ -21,9 +21,9 @@ package org.apache.comet
 
 import java.nio.ByteBuffer
 
+import org.apache.celeborn.client.ShuffleClient
 import org.apache.spark.CometTaskMemoryManager
 import org.apache.spark.sql.comet.CometMetricNode
-import org.apache.celeborn.client.ShuffleClient
 
 import org.apache.comet.parquet.CometFileKeyUnwrapper
 
@@ -203,7 +203,6 @@ class Native extends NativeBase {
    */
   @native def logMemoryUsage(name: String, memoryUsageBytes: Long): Unit
 
-
   @native def writeToCeleborn(
       addresses: Array[Long],
       rowSizes: Array[Int],
@@ -219,5 +218,5 @@ class Native extends NativeBase {
       attemptId: Int,
       partitionId: Int,
       mappersNum: Int,
-      partitioNum: Int): Array[Long]
+      partitioNum: Int): Long
 }

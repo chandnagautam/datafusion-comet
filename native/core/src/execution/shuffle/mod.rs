@@ -24,4 +24,4 @@ mod shuffle_writer;
 
 pub use codec::{read_ipc_compressed, CompressionCodec, ShuffleBlockWriter};
 pub use comet_partitioning::CometPartitioning;
-pub use shuffle_writer::ShuffleWriterExec;
+pub use shuffle_writer::{ShuffleWriterExec, CelebornWriterExec};

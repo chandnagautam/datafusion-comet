@@ -270,6 +270,7 @@ impl JVMClasses<'_> {
                 comet_batch_iterator: CometBatchIterator::new(env).unwrap(),
                 comet_task_memory_manager: CometTaskMemoryManager::new(env).unwrap(),
                 celeborn_shuffle_client: CelebornShuffleClient::new(env).unwrap(),
+                jni_store: JniStore::new(env).unwrap()
             }
         });
     }

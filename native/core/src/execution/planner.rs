@@ -24,6 +24,7 @@ use crate::{
         expressions::subquery::Subquery,
         operators::{CopyExec, ExecutionError, ExpandExec, ScanExec},
         serde::to_arrow_datatype,
+        shuffle::CelebornWriterExec,
         shuffle::ShuffleWriterExec,
     },
 };
@@ -1668,6 +1669,48 @@ impl PhysicalPlanner {
                 Ok((
                     scans,
                     Arc::new(SparkPlan::new(spark_plan.plan_id, window_agg, vec![child])),
+                ))
+            }
+            OpStruct::CelebornShuffleWriter(writer) => {
+                assert_eq!(children.len(), 1);
+                let (scans, child) = self.create_plan(&children[0], inputs, partition_count)?;
+
+                let partitioning = self
+                    .create_partitioning(writer.partitioning.as_ref().unwrap(), child.schema())?;
+
+                let codec = match writer.codec.try_into() {
+                    Ok(SparkCompressionCodec::None) => Ok(CompressionCodec::None),
+                    Ok(SparkCompressionCodec::Snappy) => Ok(CompressionCodec::Snappy),
+                    Ok(SparkCompressionCodec::Zstd) => {
+                        Ok(CompressionCodec::Zstd(writer.compression_level))
+                    }
+                    Ok(SparkCompressionCodec::Lz4) => Ok(CompressionCodec::Lz4Frame),
+                    _ => Err(GeneralError(format!(
+                        "Unsupported shuffle compression codec: {:?}",
+                        writer.codec
+                    ))),
+                }?;
+
+                let shuffle_writer = Arc::new(CelebornWriterExec::try_new(
+                    Self::wrap_in_copy_exec(Arc::clone(&child.native_plan)),
+                    partitioning,
+                    codec,
+                    writer.tracing_enabled,
+                    writer.shuffle_id,
+                    writer.map_id,
+                    writer.num_partitions,
+                    writer.num_mappers,
+                    writer.object_retrieval_id.clone(),
+                    writer.attempt_id,
+                )?);
+
+                Ok((
+                    scans,
+                    Arc::new(SparkPlan::new(
+                        spark_plan.plan_id,
+                        shuffle_writer,
+                        vec![Arc::clone(&child)],
+                    )),
                 ))
             }
         }

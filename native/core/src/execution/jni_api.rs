@@ -451,6 +451,7 @@ pub unsafe extern "system" fn Java_org_apache_comet_Native_executePlan(
 
         let tracing_event_name = match &exec_context.spark_plan.op_struct {
             Some(OpStruct::ShuffleWriter(_)) => "executePlan(ShuffleWriter)",
+            Some(OpStruct::CelebornShuffleWriter(_)) => "executePlan(CelebornShuffleWriter)",
             _ => "executePlan",
         };
 
