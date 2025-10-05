@@ -30,6 +30,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.shuffle.ShuffleWriteMetricsReporter
 import org.apache.spark.shuffle.ShuffleWriter
+import org.apache.spark.shuffle.celeborn.SparkCommonUtils
 import org.apache.spark.shuffle.celeborn.SparkUtils
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, Partitioning, RangePartitioning, SinglePartition}
@@ -47,7 +48,6 @@ import org.apache.comet.serde.OperatorOuterClass.CompressionCodec
 import org.apache.comet.serde.PartitioningOuterClass
 import org.apache.comet.serde.QueryPlanSerde
 import org.apache.comet.serde.QueryPlanSerde.serializeDataType
-import org.apache.spark.shuffle.celeborn.SparkCommonUtils
 
 class CometCelebornNativeShuffleWriter[K, V](
     outputPartitioning: Partitioning,
@@ -157,8 +157,8 @@ class CometCelebornNativeShuffleWriter[K, V](
       shuffleWriterBuilder.setObjectRetrievalId(storeId)
       shuffleWriterBuilder.setMapId(mapId)
       shuffleWriterBuilder.setAttemptId(context.taskAttemptId.intValue())
-      shuffleWriterBuilder.setNumPartitions(numParts)
-      shuffleWriterBuilder.setNumMappers(handle.dependency.rdd.getNumPartitions)
+      shuffleWriterBuilder.setNumPartitions(outputPartitioning.numPartitions)
+      shuffleWriterBuilder.setNumMappers(numParts)
       shuffleWriterBuilder.setShuffleId(shuffleId)
 
       if (SparkEnv.get.conf.getBoolean("spark.shuffle.compress", true)) {

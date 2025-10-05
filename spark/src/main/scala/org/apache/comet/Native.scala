@@ -203,6 +203,7 @@ class Native extends NativeBase {
    */
   @native def logMemoryUsage(name: String, memoryUsageBytes: Long): Unit
 
+  // scalastyle:off
   @native def writeToCeleborn(
       addresses: Array[Long],
       rowSizes: Array[Int],
@@ -219,4 +220,5 @@ class Native extends NativeBase {
       partitionId: Int,
       mappersNum: Int,
       partitioNum: Int): Long
+  // scalastyle:on
 }

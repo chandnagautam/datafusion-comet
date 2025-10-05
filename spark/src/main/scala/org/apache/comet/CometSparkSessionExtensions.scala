@@ -144,9 +144,12 @@ object CometSparkSessionExtensions extends Logging {
   private[comet] def isCometShuffleEnabled(conf: SQLConf): Boolean =
     COMET_EXEC_SHUFFLE_ENABLED.get(conf) && isCometShuffleManagerEnabled(conf)
 
-  def isCometShuffleManagerEnabled(conf: SQLConf): Boolean = {
-    conf.contains("spark.shuffle.manager") && conf.getConfString("spark.shuffle.manager") ==
-      "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager"
+  private def isCometShuffleManagerEnabled(conf: SQLConf) = {
+    val validShuffleManagers = Set(
+      "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager",
+      "org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleManager")
+    conf.contains("spark.shuffle.manager") && validShuffleManagers.contains(
+      conf.getConfString("spark.shuffle.manager"))
   }
 
   private[comet] def isCometScanEnabled(conf: SQLConf): Boolean = {

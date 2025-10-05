@@ -50,6 +50,7 @@ use futures::executor::block_on;
 use futures::{StreamExt, TryFutureExt, TryStreamExt};
 use itertools::Itertools;
 use jni::objects::{GlobalRef, JObject};
+use log::info;
 use std::borrow::Borrow;
 use std::io::{Cursor, Error, SeekFrom};
 use std::panic;
@@ -1283,6 +1284,7 @@ impl Write for CelebornWriter {
             let buffer: JObject = env
                 .new_direct_byte_buffer(buf.get_unchecked(0) as *const u8 as *mut u8, buf.len())?
                 .into();
+            info!("Num mappers: {}, num partitions: {}, shuffle id: {}, partition id: {}, map id: {}", self.num_mappers, self.num_partitions, self.shuffle_id, self.partition_id, self.map_id);
             let ret = jni_call!(&mut env, celeborn_shuffle_client(self.spill_writer_handle.as_obj()).push_data(self.shuffle_id, self.map_id, self.attempt_id, self.partition_id, &buffer, 0, buf.len() as i64, self.num_mappers, self.num_partitions) -> i64);
 
             env.delete_local_ref(buffer)?;

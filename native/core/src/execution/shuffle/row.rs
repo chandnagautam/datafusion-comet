@@ -986,13 +986,6 @@ pub fn process_sorted_row_partition_for_celeborn(
         let mut env = JVMClasses::get_env()?;
 
         unsafe {
-            // let mut buffer = env.new_byte_array(frozen.len() as i32)?;
-
-            //let frozen_ptr = frozen.as_ptr() as *const i8;
-            //let frozen_ref = std::slice::from_raw_parts(frozen_ptr, frozen.len());
-
-            //env.set_byte_array_region(&buffer, 0, frozen_ref)?;
-
             let frozen_ref = frozen.as_slice();
 
             // TODO: move this to auto local to ensure drop of it after scope
@@ -1008,10 +1001,10 @@ pub fn process_sorted_row_partition_for_celeborn(
             let handle = shuffle_client.as_obj();
             jni_call!(&mut env,
               celeborn_shuffle_client(handle).push_data(shuffle_id, map_id, attempt_id, partition_id,
-                    &buffer, 0 as i32, frozen.len() as i64, mappers_num, partition_num) -> i64);
+                    &buffer, 0, frozen.len() as i64, mappers_num, partition_num) -> i64)?;
 
             // free JVM reference
-            env.delete_local_ref(buffer);
+            env.delete_local_ref(buffer)?;
         }
 
         current_row += n;

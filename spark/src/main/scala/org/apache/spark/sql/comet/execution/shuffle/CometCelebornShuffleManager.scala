@@ -25,6 +25,7 @@ import java.util.Collections
 import org.apache.celeborn.client.LifecycleManager
 import org.apache.celeborn.client.ShuffleClient
 import org.apache.celeborn.common.CelebornConf
+import org.apache.celeborn.common.identity.UserIdentifier
 import org.apache.celeborn.common.protocol.ShuffleMode
 import org.apache.spark.MapOutputTrackerMaster
 import org.apache.spark.ShuffleDependency
@@ -54,9 +55,10 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.comet.CometConf
 import org.apache.comet.CometConf.COMET_CONVERT_FROM_CSV_ENABLED
 import org.apache.comet.serde.ExprOuterClass.BloomFilterMightContain
-import org.apache.celeborn.common.identity.UserIdentifier
 
-class CometCelebornShuffleManager(conf: SparkConf, isDriver: Boolean) extends ShuffleManager with Logging {
+class CometCelebornShuffleManager(conf: SparkConf, isDriver: Boolean)
+    extends ShuffleManager
+    with Logging {
   private val vanillaCelebornShuffleManager = new SparkShuffleManager(conf, isDriver)
 
   private var lifecycleManager: LifecycleManager = _
@@ -133,6 +135,7 @@ class CometCelebornShuffleManager(conf: SparkConf, isDriver: Boolean) extends Sh
               s"Unsupported shuffle type: ${cometShuffleDependency.shuffleType}")
         }
       case _ =>
+        // TODO: Handle vanillaCelebornShuffleManager shuffle registration
         new CelebornShuffleHandle(
           appUniqueId,
           lifecycleManager.getHost,
@@ -155,6 +158,8 @@ class CometCelebornShuffleManager(conf: SparkConf, isDriver: Boolean) extends Sh
       case native: CometCelebornNativeShuffleHandle[K @unchecked, V @unchecked] =>
         val dep = native.dependency.asInstanceOf[CometShuffleDependency[_, _, _]]
         val celebornShuffleId = initShuffleClientForWriter(native, context)
+        logInfo(s"mappers: ${dep.numParts}, mapId: ${context.partitionId}")
+        logInfo(s"partitions: ${dep.outputPartitioning.get.numPartitions}")
         new CometCelebornNativeShuffleWriter(
           dep.outputPartitioning.get,
           dep.outputAttributes,
@@ -165,9 +170,10 @@ class CometCelebornShuffleManager(conf: SparkConf, isDriver: Boolean) extends Sh
           context,
           metrics,
           shuffleClient,
-          native
-        )
-      case bypassMergeSortHandle: CometCelebornBypassMergeSortHandle[K @unchecked, V @unchecked] =>
+          native)
+      case bypassMergeSortHandle: CometCelebornBypassMergeSortHandle[
+            K @unchecked,
+            V @unchecked] =>
         val celebornShuffleId = initShuffleClientForWriter(bypassMergeSortHandle, context)
         new CometCelebornBypassMergeSortWriter(
           shuffleClient,
@@ -178,9 +184,10 @@ class CometCelebornShuffleManager(conf: SparkConf, isDriver: Boolean) extends Sh
           bypassMergeSortHandle,
           conf,
           celebornConf,
-          metrics
-        )
-      case unsafeShuffleHandle: CometCelebornSerializedShuffleHandle[K @unchecked, V @unchecked] =>
+          metrics)
+      case unsafeShuffleHandle: CometCelebornSerializedShuffleHandle[
+            K @unchecked,
+            V @unchecked] =>
         val celebornShuffleId = initShuffleClientForWriter(unsafeShuffleHandle, context)
         new CometCelebornUnsafeShuffleWriter(
           context.taskMemoryManager,
@@ -191,8 +198,7 @@ class CometCelebornShuffleManager(conf: SparkConf, isDriver: Boolean) extends Sh
           celebornConf,
           metrics,
           shuffleClient,
-          celebornShuffleId
-        )
+          celebornShuffleId)
       case _ =>
         vanillaCelebornShuffleManager.getWriter(handle, mapId, context, metrics)
     }
@@ -206,19 +212,28 @@ class CometCelebornShuffleManager(conf: SparkConf, isDriver: Boolean) extends Sh
       endPartition: Int,
       context: TaskContext,
       metrics: ShuffleReadMetricsReporter): ShuffleReader[K, C] =
-    if (handle.isInstanceOf[CometCelebornBypassMergeSortHandle[_, _]] || handle.isInstanceOf[CometCelebornSerializedShuffleHandle[_, _]] || handle.isInstanceOf[CometNativeShuffleHandle[_, _]]) {
+    if (handle.isInstanceOf[CometCelebornBypassMergeSortHandle[_, _]] || handle
+        .isInstanceOf[CometCelebornSerializedShuffleHandle[_, _]] || handle
+        .isInstanceOf[CometNativeShuffleHandle[_, _]]) {
       new CometCelebornShuffleReader(
-        handle.asInstanceOf[BaseShuffleHandle[K, _, C]],
+        handle.asInstanceOf[CelebornShuffleHandle[K, _, C]],
         startPartition,
         endPartition,
         startMapIndex,
         endMapIndex,
         context,
+        celebornConf,
         metrics,
-        shuffleIdTracker
-      )
+        shuffleIdTracker)
     } else {
-      vanillaCelebornShuffleManager.getReader(handle, startMapIndex, endMapIndex, startPartition, endPartition, context, metrics)
+      vanillaCelebornShuffleManager.getReader(
+        handle,
+        startMapIndex,
+        endMapIndex,
+        startPartition,
+        endPartition,
+        context,
+        metrics)
     }
 
   override def unregisterShuffle(shuffleId: Int): Boolean = {
@@ -316,15 +331,16 @@ class CometCelebornShuffleManager(conf: SparkConf, isDriver: Boolean) extends Sh
     }
   }
 
-  private def initShuffleClientForWriter(handle: CelebornShuffleHandle[_, _, _], context: TaskContext): Int = {
+  private def initShuffleClientForWriter(
+      handle: CelebornShuffleHandle[_, _, _],
+      context: TaskContext): Int = {
     shuffleClient = ShuffleClient.get(
       handle.appUniqueId,
       handle.lifecycleManagerHost,
       handle.lifecycleManagerPort,
       celebornConf,
       handle.userIdentifier,
-      handle.extension
-    )
+      handle.extension)
     if (handle.stageRerunEnabled) {
       SparkUtils.addFailureListenerIfBarrierTask(shuffleClient, context, handle)
     }
@@ -342,7 +358,15 @@ private[spark] class CometCelebornBypassMergeSortHandle[K, V](
     stageRerunEnabled: Boolean,
     numMappers: Int,
     dependency: ShuffleDependency[K, V, V])
-    extends CelebornShuffleHandle(appId, host, port, userIdentifier, shuffleId,  stageRerunEnabled, numMappers, dependency) {}
+    extends CelebornShuffleHandle(
+      appId,
+      host,
+      port,
+      userIdentifier,
+      shuffleId,
+      stageRerunEnabled,
+      numMappers,
+      dependency) {}
 
 private[spark] class CometCelebornSerializedShuffleHandle[K, V](
     shuffleId: Int,
@@ -353,7 +377,15 @@ private[spark] class CometCelebornSerializedShuffleHandle[K, V](
     stageRerunEnabled: Boolean,
     numMappers: Int,
     dependency: ShuffleDependency[K, V, V])
-    extends CelebornShuffleHandle( appId, host, port, userIdentifier, shuffleId, stageRerunEnabled, numMappers, dependency) {}
+    extends CelebornShuffleHandle(
+      appId,
+      host,
+      port,
+      userIdentifier,
+      shuffleId,
+      stageRerunEnabled,
+      numMappers,
+      dependency) {}
 
 private[spark] class CometCelebornNativeShuffleHandle[K, V](
     shuffleId: Int,
@@ -364,4 +396,12 @@ private[spark] class CometCelebornNativeShuffleHandle[K, V](
     stageRerunEnabled: Boolean,
     numMappers: Int,
     dependency: ShuffleDependency[K, V, V])
-    extends CelebornShuffleHandle(appId, host, port, userIdentifier, shuffleId, stageRerunEnabled, numMappers, dependency) {}
+    extends CelebornShuffleHandle(
+      appId,
+      host,
+      port,
+      userIdentifier,
+      shuffleId,
+      stageRerunEnabled,
+      numMappers,
+      dependency) {}
