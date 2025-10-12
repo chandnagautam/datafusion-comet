@@ -17,6 +17,8 @@
 
 //! Defines the External shuffle repartition plan.
 
+use crate::errors::CometError;
+use crate::execution::shuffle::range_partitioner::RangePartitioner;
 use crate::execution::shuffle::{CometPartitioning, CompressionCodec, ShuffleBlockWriter};
 use crate::execution::tracing::{with_trace, with_trace_async};
 use crate::jni_map_error;
@@ -366,7 +368,7 @@ impl MultiPartitionShuffleRepartitioner {
         runtime: Arc<RuntimeEnv>,
         batch_size: usize,
         codec: CompressionCodec,
-        tracing_enabled: bool
+        tracing_enabled: bool,
     ) -> Result<Self> {
         let num_output_partitions = partitioning.partition_count();
         assert_ne!(
@@ -1281,19 +1283,40 @@ impl Write for CelebornWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let res = move || unsafe {
             let mut env = JVMClasses::get_env()?;
-            let buffer: JObject = env
-                .new_direct_byte_buffer(buf.get_unchecked(0) as *const u8 as *mut u8, buf.len())?
-                .into();
-            info!("Num mappers: {}, num partitions: {}, shuffle id: {}, partition id: {}, map id: {}", self.num_mappers, self.num_partitions, self.shuffle_id, self.partition_id, self.map_id);
-            let ret = jni_call!(&mut env, celeborn_shuffle_client(self.spill_writer_handle.as_obj()).push_data(self.shuffle_id, self.map_id, self.attempt_id, self.partition_id, &buffer, 0, buf.len() as i64, self.num_mappers, self.num_partitions) -> i64);
+            let buffer = env.new_byte_array(buf.len() as i32)?;
+
+            env.set_byte_array_region(&buffer, 0, &*(buf as *const [u8] as *const [i8]))?;
+
+            info!(
+                "Num mappers: {}, num partitions: {}, shuffle id: {}, partition id: {}, map id: {}",
+                self.num_mappers,
+                self.num_partitions,
+                self.shuffle_id,
+                self.partition_id,
+                self.map_id
+            );
+            jni_call!(&mut env,
+                celeborn_shuffle_client(self.spill_writer_handle.as_obj())
+                    .push_data(
+                        self.shuffle_id,
+                        self.map_id,
+                        self.attempt_id,
+                        self.partition_id,
+                        &buffer,
+                        0,
+                        buf.len() as i32,
+                        self.num_mappers,
+                        self.num_partitions
+                    ) -> i32
+            )?;
 
             env.delete_local_ref(buffer)?;
 
-            ret
+            Ok::<usize, CometError>(buf.len())
         };
 
         match res() {
-            Ok(size) => Ok(size as usize),
+            Ok(size) => Ok(size),
             Err(e) => Err(std::io::Error::other(e.to_string())),
         }
     }
@@ -1381,6 +1404,7 @@ struct CelebornSinglePartitionShufflePartition {
 }
 
 impl CelebornSinglePartitionShufflePartition {
+    #[allow(clippy::too_many_arguments)]
     fn try_new(
         schema: SchemaRef,
         metrics: ShuffleRepartitionerMetrics,
@@ -1389,11 +1413,20 @@ impl CelebornSinglePartitionShufflePartition {
         shuffle_writer_hanlde: Arc<GlobalRef>,
         attempt_id: i32,
         shuffle_id: i32,
+        num_mappers: i32,
+        map_id: i32,
     ) -> Result<Self> {
         let shuffle_block_writer = ShuffleBlockWriter::try_new(schema.as_ref(), codec.clone())?;
 
-        let celeborn_writer =
-            CelebornWriter::try_new(shuffle_writer_hanlde, shuffle_id, 1, attempt_id, 1, 1, 1)?;
+        let celeborn_writer = CelebornWriter::try_new(
+            shuffle_writer_hanlde,
+            shuffle_id,
+            map_id,
+            attempt_id,
+            1,
+            num_mappers,
+            1,
+        )?;
 
         let output_data_writer = BufBatchWriter::new(shuffle_block_writer, celeborn_writer);
 
@@ -1925,11 +1958,11 @@ impl CelebornMultiPartitionShuffleRepartitioner {
 impl Debug for CelebornMultiPartitionShuffleRepartitioner {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("CelebornShufflePartitioner")
-        .field("memory_used", &self.used())
-        .field("spilled_bytes", &self.spilled_bytes())
-        .field("spilled_count", &self.spill_count())
-        .field("data_size", &self.data_size())
-        .finish()
+            .field("memory_used", &self.used())
+            .field("spilled_bytes", &self.spilled_bytes())
+            .field("spilled_count", &self.spill_count())
+            .field("data_size", &self.data_size())
+            .finish()
     }
 }
 
@@ -2003,7 +2036,7 @@ impl CelebornWriterExec {
         num_partitions: i32,
         num_mappers: i32,
         jni_store_id: String,
-        attempt_id: i32
+        attempt_id: i32,
     ) -> Result<Self> {
         let cache = PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&input.schema())),
@@ -2034,7 +2067,7 @@ impl CelebornWriterExec {
             num_mappers,
             shuffle_write_handle: handle,
             jni_store_id,
-            attempt_id
+            attempt_id,
         })
     }
 }
@@ -2092,7 +2125,7 @@ impl ExecutionPlan for CelebornWriterExec {
                 self.num_partitions,
                 self.num_mappers,
                 self.jni_store_id.clone(),
-                self.attempt_id
+                self.attempt_id,
             )?)),
             _ => panic!("CelebornWriterExec wrong number of children"),
         }
@@ -2158,6 +2191,8 @@ async fn celeborn_external_shuffle(
                     Arc::clone(&shuffle_writer_handle),
                     attempt_id,
                     shuffle_id,
+                    num_mappers,
+                    map_id,
                 )?)
             }
             _ => Box::new(CelebornMultiPartitionShuffleRepartitioner::try_new(

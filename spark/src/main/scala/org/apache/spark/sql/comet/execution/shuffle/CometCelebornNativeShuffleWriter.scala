@@ -20,8 +20,10 @@
 package org.apache.spark.sql.comet.execution.shuffle
 
 import java.util.UUID
+import java.util.concurrent.atomic.LongAdder
 
 import scala.collection.JavaConverters.asJavaIterableConverter
+import scala.collection.mutable
 
 import org.apache.celeborn.client.ShuffleClient
 import org.apache.spark.SparkEnv
@@ -65,7 +67,14 @@ class CometCelebornNativeShuffleWriter[K, V](
 
   private val OFFSET_LENGTH = 8
 
-  var partitionLengths: Array[Long] = _
+  var mapStatusLengths: Array[LongAdder] = {
+    val ret = new Array[LongAdder](numParts)
+    for (i <- 0 until numParts) {
+      ret(i) = new LongAdder()
+    }
+
+    ret
+  }
   var mapStatus: MapStatus = _
 
   private var stopping = false
@@ -115,12 +124,15 @@ class CometCelebornNativeShuffleWriter[K, V](
     metricsReporter.incRecordsWritten(metricsOutputRows.value)
     metricsReporter.incWriteTime(metricsWriteTime.value)
 
+    mapStatusLengths(context.partitionId()).add(metricsOutputRows.value)
+
     shuffleClient.prepareForMergeData(shuffleId, mapId, context.attemptNumber)
     shuffleClient.pushMergedData(shuffleId, mapId, context.attemptNumber)
     shuffleClient.mapperEnd(shuffleId, mapId, context.attemptNumber(), numParts)
 
-    val bmId = SparkEnv.get.blockManager.blockManagerId
-    mapStatus = SparkUtils.createMapStatus(bmId, partitionLengths, mapId)
+    val bmId = SparkEnv.get.blockManager.shuffleServerId
+    mapStatus =
+      SparkUtils.createMapStatus(bmId, SparkUtils.unwrap(mapStatusLengths), context.taskAttemptId)
   }
 
   override def stop(success: Boolean): Option[MapStatus] = {
@@ -255,5 +267,8 @@ class CometCelebornNativeShuffleWriter[K, V](
     }
   }
 
-  override def getPartitionLengths(): Array[Long] = partitionLengths
+  override def getPartitionLengths(): Array[Long] =
+    throw new UnsupportedOperationException(
+      "Celeborn is not compatible with Spark push mode," +
+        "please set spark.shuffle.push.enabled to false")
 }

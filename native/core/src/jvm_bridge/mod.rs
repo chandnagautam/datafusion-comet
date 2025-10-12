@@ -21,6 +21,7 @@ use crate::errors::CometResult;
 
 use celeborn_shuffle_client::CelebornShuffleClient;
 use jni::objects::JClass;
+use jni::signature::Primitive;
 use jni::{
     errors::Error,
     objects::{JMethodID, JObject, JString, JThrowable, JValueGen, JValueOwned},
@@ -174,9 +175,9 @@ pub(crate) use jvalues;
 mod comet_exec;
 pub use comet_exec::*;
 mod batch_iterator;
+mod celeborn_shuffle_client;
 mod comet_metric_node;
 mod comet_task_memory_manager;
-mod celeborn_shuffle_client;
 mod jni_store;
 
 use crate::{errors::CometError, JAVA_VM};
@@ -201,6 +202,10 @@ pub struct JVMClasses<'a> {
     pub throwable_get_message_method: JMethodID,
     /// Cached method ID for "java.lang.Throwable#getCause"
     pub throwable_get_cause_method: JMethodID,
+
+    // TODO: Remove this and its references
+    /// print stack trace
+    pub throwable_print_stack_trace_method: JMethodID,
 
     /// The CometMetricNode class. Used for updating the metrics.
     pub comet_metric_node: CometMetricNode<'a>,
@@ -254,6 +259,10 @@ impl JVMClasses<'_> {
                 .get_method_id(&java_lang_throwable, "getCause", "()Ljava/lang/Throwable;")
                 .unwrap();
 
+            let throwable_print_stack_trace_method = env
+                .get_method_id(&java_lang_throwable, "printStackTrace", "()V")
+                .unwrap();
+
             // SAFETY: According to the documentation for `JMethodID`, it is our
             // responsibility to maintain a reference to the `JClass` instances where the
             // methods were accessed from to prevent the methods from being garbage-collected
@@ -265,12 +274,13 @@ impl JVMClasses<'_> {
                 class_get_name_method,
                 throwable_get_message_method,
                 throwable_get_cause_method,
+                throwable_print_stack_trace_method,
                 comet_metric_node: CometMetricNode::new(env).unwrap(),
                 comet_exec: CometExec::new(env).unwrap(),
                 comet_batch_iterator: CometBatchIterator::new(env).unwrap(),
                 comet_task_memory_manager: CometTaskMemoryManager::new(env).unwrap(),
                 celeborn_shuffle_client: CelebornShuffleClient::new(env).unwrap(),
-                jni_store: JniStore::new(env).unwrap()
+                jni_store: JniStore::new(env).unwrap(),
             }
         });
     }
@@ -358,6 +368,13 @@ fn get_throwable_message(
         } else {
             String::from("null")
         };
+
+        env.call_method_unchecked(
+            throwable,
+            jvm_classes.throwable_print_stack_trace_method,
+            ReturnType::Primitive(Primitive::Void),
+            &[],
+        )?;
 
         let cause: JThrowable = env
             .call_method_unchecked(
