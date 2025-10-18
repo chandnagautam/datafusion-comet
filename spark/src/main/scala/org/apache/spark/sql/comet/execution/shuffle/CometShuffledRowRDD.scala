@@ -104,7 +104,6 @@ class CometShuffledBatchRDD(
             endReducerIndex,
             context,
             sqlMetricsReporter)
-          .asInstanceOf[CometBlockStoreShuffleReader[_, _]]
 
       case PartialReducerPartitionSpec(reducerIndex, startMapIndex, endMapIndex, _) =>
         SparkEnv.get.shuffleManager
@@ -116,7 +115,6 @@ class CometShuffledBatchRDD(
             reducerIndex + 1,
             context,
             sqlMetricsReporter)
-          .asInstanceOf[CometBlockStoreShuffleReader[_, _]]
 
       case PartialMapperPartitionSpec(mapIndex, startReducerIndex, endReducerIndex) =>
         SparkEnv.get.shuffleManager
@@ -128,7 +126,6 @@ class CometShuffledBatchRDD(
             endReducerIndex,
             context,
             sqlMetricsReporter)
-          .asInstanceOf[CometBlockStoreShuffleReader[_, _]]
 
       case CoalescedMapperPartitionSpec(startMapIndex, endMapIndex, numReducers) =>
         SparkEnv.get.shuffleManager
@@ -140,7 +137,6 @@ class CometShuffledBatchRDD(
             numReducers,
             context,
             sqlMetricsReporter)
-          .asInstanceOf[CometBlockStoreShuffleReader[_, _]]
     }
 
     // TODO: Reads IPC by native code

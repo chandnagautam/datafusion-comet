@@ -2110,6 +2110,14 @@ impl ExecutionPlan for CelebornWriterExec {
         self.input.schema()
     }
 
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
+    }
+
+    fn statistics(&self) -> Result<Statistics> {
+        self.input.partition_statistics(None)
+    }
+
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
