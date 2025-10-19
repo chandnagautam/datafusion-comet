@@ -214,7 +214,7 @@ class CometCelebornShuffleManager(conf: SparkConf, isDriver: Boolean)
       metrics: ShuffleReadMetricsReporter): ShuffleReader[K, C] =
     if (handle.isInstanceOf[CometCelebornBypassMergeSortHandle[_, _]] || handle
         .isInstanceOf[CometCelebornSerializedShuffleHandle[_, _]] || handle
-        .isInstanceOf[CometNativeShuffleHandle[_, _]]) {
+        .isInstanceOf[CometCelebornNativeShuffleHandle[_, _]]) {
       new CometCelebornShuffleReader(
         handle.asInstanceOf[CelebornShuffleHandle[K, _, C]],
         startPartition,

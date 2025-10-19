@@ -126,9 +126,9 @@ class CometCelebornNativeShuffleWriter[K, V](
 
     mapStatusLengths(context.partitionId()).add(metricsOutputRows.value)
 
-    shuffleClient.prepareForMergeData(shuffleId, mapId, context.attemptNumber)
-    shuffleClient.pushMergedData(shuffleId, mapId, context.attemptNumber)
-    shuffleClient.mapperEnd(shuffleId, mapId, context.attemptNumber(), numParts)
+    shuffleClient.prepareForMergeData(shuffleId, mapId, attemptNumber)
+    shuffleClient.pushMergedData(shuffleId, mapId, attemptNumber)
+    shuffleClient.mapperEnd(shuffleId, mapId, attemptNumber, numParts)
 
     val bmId = SparkEnv.get.blockManager.shuffleServerId
     mapStatus =
@@ -168,7 +168,7 @@ class CometCelebornNativeShuffleWriter[K, V](
       JniStore.add(storeId, shuffleClient)
       shuffleWriterBuilder.setObjectRetrievalId(storeId)
       shuffleWriterBuilder.setMapId(mapId)
-      shuffleWriterBuilder.setAttemptId(context.taskAttemptId.intValue())
+      shuffleWriterBuilder.setAttemptId(attemptNumber)
       shuffleWriterBuilder.setNumPartitions(outputPartitioning.numPartitions)
       shuffleWriterBuilder.setNumMappers(numParts)
       shuffleWriterBuilder.setShuffleId(shuffleId)

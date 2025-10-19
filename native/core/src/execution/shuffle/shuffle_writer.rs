@@ -1288,12 +1288,13 @@ impl Write for CelebornWriter {
             env.set_byte_array_region(&buffer, 0, &*(buf as *const [u8] as *const [i8]))?;
 
             info!(
-                "Num mappers: {}, num partitions: {}, shuffle id: {}, partition id: {}, map id: {}",
+                "Num mappers: {}, num partitions: {}, shuffle id: {}, partition id: {}, map id: {}, attempt_id: {}",
                 self.num_mappers,
                 self.num_partitions,
                 self.shuffle_id,
                 self.partition_id,
-                self.map_id
+                self.map_id,
+                self.attempt_id
             );
             jni_call!(&mut env,
                 celeborn_shuffle_client(self.spill_writer_handle.as_obj())
@@ -1423,7 +1424,9 @@ impl CelebornSinglePartitionShufflePartition {
             shuffle_id,
             map_id,
             attempt_id,
-            1,
+            // Celeborn Reader start parition fetch from 0
+            // as we are using the existing reader, we will use parition number as 0
+            0,
             num_mappers,
             1,
         )?;
