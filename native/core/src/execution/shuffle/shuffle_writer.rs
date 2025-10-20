@@ -1872,7 +1872,7 @@ impl CelebornMultiPartitionShuffleRepartitioner {
             result
         };
         if grow_result.is_err() {
-            self.spill()?;
+            self.spill(false)?;
         }
 
         Ok(())
@@ -1917,7 +1917,6 @@ impl CelebornMultiPartitionShuffleRepartitioner {
     fn partitioned_batches(&mut self) -> PartitionedBatchesProducer {
         let num_output_partitions = self.partition_indices.len();
         let buffered_batches = std::mem::take(&mut self.buffered_batches);
-        // let indices = std::mem::take(&mut self.partition_indices);
         let indices = std::mem::replace(
             &mut self.partition_indices,
             vec![vec![]; num_output_partitions],
@@ -1925,7 +1924,7 @@ impl CelebornMultiPartitionShuffleRepartitioner {
         PartitionedBatchesProducer::new(buffered_batches, indices, self.batch_size)
     }
 
-    fn spill(&mut self) -> Result<()> {
+    fn spill(&mut self, is_write: bool) -> Result<()> {
         log::debug!(
             "CelebornShuffleRepartitioner spilling shuffle data of {} while inserting ({} time(s) so far)",
             self.used(),
@@ -1945,14 +1944,19 @@ impl CelebornMultiPartitionShuffleRepartitioner {
             for partition_id in 0..num_output_partitions {
                 let partition_writer = &mut self.partition_writers[partition_id];
                 let mut iter = partitioned_batches.produce(partition_id);
-                spilled_bytes += partition_writer.spill(&mut iter, &self.metrics)?;
+                let written_records = partition_writer.spill(&mut iter, &self.metrics)?;
+                if !is_write {
+                    spilled_bytes += written_records;
+                }
             }
 
             let mut timer = self.metrics.mempool_time.timer();
             self.reservation.free();
             timer.stop();
-            self.metrics.spill_count.add(1);
-            self.metrics.spilled_bytes.add(spilled_bytes);
+            if !is_write {
+                self.metrics.spill_count.add(1);
+                self.metrics.spilled_bytes.add(spilled_bytes);
+            }
             Ok(())
         })
     }
@@ -1998,8 +2002,7 @@ impl ShufflePartitioner for CelebornMultiPartitionShuffleRepartitioner {
         with_trace("shuffle_write", self.tracing_enabled, || {
             let start_time = Instant::now();
 
-            self.spill()?;
-
+            self.spill(true)?;
 
             self.metrics
                 .baseline

@@ -38,6 +38,6 @@ public class JniStore {
   }
 
   public static Object get(String key) {
-    return JniStoreHolder.INSTANCE.objectStore.get(key);
+    return JniStoreHolder.INSTANCE.objectStore.remove(key);
   }
 }
