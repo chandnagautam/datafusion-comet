@@ -1882,7 +1882,7 @@ impl CelebornMultiPartitionShuffleRepartitioner {
     fn shuffle_write_partition(
         partition_iter: &mut PartitionedBatchIterator,
         shuffle_block_writer: &mut ShuffleBlockWriter,
-        output_data: &mut BufWriter<File>,
+        output_data: &mut BufWriter<CelebornWriter>,
         encode_time: &Time,
         write_time: &Time,
     ) -> Result<()> {
@@ -1975,7 +1975,7 @@ impl ShufflePartitioner for CelebornMultiPartitionShuffleRepartitioner {
     /// This function will slice input batch according to configured batch size and then
     /// shuffle rows into corresponding partition buffer.
     async fn insert_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        with_trace_async("shuffle_insert_batch", self.tracing_enabled, || async {
+        with_trace_async("celeborn_shuffle_insert_batch", self.tracing_enabled, || async {
             let start_time = Instant::now();
             let mut start = 0;
             while start < batch.num_rows() {
@@ -1998,7 +1998,8 @@ impl ShufflePartitioner for CelebornMultiPartitionShuffleRepartitioner {
         with_trace("shuffle_write", self.tracing_enabled, || {
             let start_time = Instant::now();
 
-            // TODO: call flush from here
+            self.spill()?;
+
 
             self.metrics
                 .baseline

@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.LongAdder
 import scala.collection.JavaConverters.asJavaIterableConverter
 import scala.collection.mutable
 
+import org.apache.celeborn.CelebornShuffleClientWrapper
 import org.apache.celeborn.client.ShuffleClient
 import org.apache.spark.SparkEnv
 import org.apache.spark.TaskContext
@@ -67,9 +68,13 @@ class CometCelebornNativeShuffleWriter[K, V](
 
   private val OFFSET_LENGTH = 8
 
+  private val shuffleWrapper = new CelebornShuffleClientWrapper(shuffleClient)
+
+  private val outputPartitions = outputPartitioning.numPartitions
+
   var mapStatusLengths: Array[LongAdder] = {
-    val ret = new Array[LongAdder](numParts)
-    for (i <- 0 until numParts) {
+    val ret = new Array[LongAdder](outputPartitions)
+    for (i <- 0 until outputPartitions) {
       ret(i) = new LongAdder()
     }
 
@@ -119,12 +124,15 @@ class CometCelebornNativeShuffleWriter[K, V](
     }
     cometIter.close()
 
-    // TODO: Figure out a way to find the total written bytes
-    // metricsReporter.incBytesWritten(Files.size(tempDataFilePath))
+    metricsReporter.incBytesWritten(
+      shuffleWrapper.getShuffleDataMetrics().values().stream().mapToInt(x => x.intValue()).sum())
     metricsReporter.incRecordsWritten(metricsOutputRows.value)
     metricsReporter.incWriteTime(metricsWriteTime.value)
 
-    mapStatusLengths(context.partitionId()).add(metricsOutputRows.value)
+    shuffleWrapper
+      .getShuffleDataMetrics()
+      .forEach((partition, bytesWritten) =>
+        mapStatusLengths(partition).add(bytesWritten.longValue()))
 
     shuffleClient.prepareForMergeData(shuffleId, mapId, attemptNumber)
     shuffleClient.pushMergedData(shuffleId, mapId, attemptNumber)
@@ -165,11 +173,11 @@ class CometCelebornNativeShuffleWriter[K, V](
 
       val shuffleWriterBuilder = OperatorOuterClass.CelebornShuffleWriter.newBuilder()
       val storeId = s"CelebornShuffleClient:${UUID.randomUUID()}"
-      JniStore.add(storeId, shuffleClient)
+      JniStore.add(storeId, shuffleWrapper)
       shuffleWriterBuilder.setObjectRetrievalId(storeId)
       shuffleWriterBuilder.setMapId(mapId)
       shuffleWriterBuilder.setAttemptId(attemptNumber)
-      shuffleWriterBuilder.setNumPartitions(outputPartitioning.numPartitions)
+      shuffleWriterBuilder.setNumPartitions(outputPartitions)
       shuffleWriterBuilder.setNumMappers(numParts)
       shuffleWriterBuilder.setShuffleId(shuffleId)
 
@@ -190,7 +198,7 @@ class CometCelebornNativeShuffleWriter[K, V](
           val hashPartitioning = outputPartitioning.asInstanceOf[HashPartitioning]
 
           val partitioning = PartitioningOuterClass.HashPartition.newBuilder()
-          partitioning.setNumPartitions(outputPartitioning.numPartitions)
+          partitioning.setNumPartitions(outputPartitions)
 
           val partitionExprs = hashPartitioning.expressions
             .flatMap(e => QueryPlanSerde.exprToProto(e, outputAttributes))
@@ -209,7 +217,7 @@ class CometCelebornNativeShuffleWriter[K, V](
           val rangePartitioning = outputPartitioning.asInstanceOf[RangePartitioning]
 
           val partitioning = PartitioningOuterClass.RangePartition.newBuilder()
-          partitioning.setNumPartitions(outputPartitioning.numPartitions)
+          partitioning.setNumPartitions(outputPartitions)
           val sampleSize = {
             // taken from org.apache.spark.RangePartitioner#rangeBounds
             // This is the sample size we need to have roughly balanced output partitions,
@@ -218,7 +226,7 @@ class CometCelebornNativeShuffleWriter[K, V](
             val sampleSize = math.min(
               SQLConf.get
                 .getConf(SQLConf.RANGE_EXCHANGE_SAMPLE_SIZE_PER_PARTITION)
-                .toDouble * outputPartitioning.numPartitions,
+                .toDouble * outputPartitions,
               1e6)
             // Assume the input partitions are roughly balanced and over-sample a little bit.
             // Comet: we don't divide by numPartitions since each DF plan handles one partition.

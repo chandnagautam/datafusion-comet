@@ -32,7 +32,7 @@ pub struct CelebornShuffleClient<'a> {
 }
 
 impl<'a> CelebornShuffleClient<'a> {
-    pub const JVM_CLASS: &'static str = "org/apache/celeborn/client/ShuffleClient";
+    pub const JVM_CLASS: &'static str = "org/apache/celeborn/CelebornShuffleClientWrapper";
 
     pub fn new(env: &mut JNIEnv<'a>) -> JniResult<CelebornShuffleClient<'a>> {
         let class = env.find_class(Self::JVM_CLASS)?;
