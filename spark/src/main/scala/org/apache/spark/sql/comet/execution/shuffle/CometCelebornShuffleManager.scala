@@ -170,7 +170,8 @@ class CometCelebornShuffleManager(conf: SparkConf, isDriver: Boolean)
           context,
           metrics,
           shuffleClient,
-          native)
+          native,
+          dep.rangePartitionBounds)
       case bypassMergeSortHandle: CometCelebornBypassMergeSortHandle[
             K @unchecked,
             V @unchecked] =>

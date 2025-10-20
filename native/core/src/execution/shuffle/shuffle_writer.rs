@@ -18,7 +18,6 @@
 //! Defines the External shuffle repartition plan.
 
 use crate::errors::CometError;
-use crate::execution::shuffle::range_partitioner::RangePartitioner;
 use crate::execution::shuffle::{CometPartitioning, CompressionCodec, ShuffleBlockWriter};
 use crate::execution::tracing::{with_trace, with_trace_async};
 use crate::jni_map_error;
@@ -1559,10 +1558,6 @@ struct CelebornMultiPartitionShuffleRepartitioner {
     /// Reservation for repartitioning
     reservation: MemoryReservation,
     tracing_enabled: bool,
-    /// RangePartitioning-specific state
-    bounds_rows: Option<Vec<OwnedRow>>,
-    row_converter: Option<RowConverter>,
-    seed: u64,
 }
 
 impl CelebornMultiPartitionShuffleRepartitioner {
@@ -1628,10 +1623,6 @@ impl CelebornMultiPartitionShuffleRepartitioner {
             batch_size,
             reservation,
             tracing_enabled,
-            bounds_rows: None,
-            row_converter: None,
-            // Spark RangePartitioner seeds off of partition number.
-            seed: partition as u64,
         })
     }
 
@@ -1688,6 +1679,13 @@ impl CelebornMultiPartitionShuffleRepartitioner {
             }
 
             // after calculating, partition ends become partition starts
+        }
+
+        if input.num_rows() > self.batch_size {
+            return Err(DataFusionError::Internal(
+                "Input batch size exceeds configured batch size. Call `insert_batch` instead."
+                    .to_string(),
+            ));
         }
 
         self.metrics.data_size.add(input.get_array_memory_size());
@@ -1750,7 +1748,8 @@ impl CelebornMultiPartitionShuffleRepartitioner {
             CometPartitioning::RangePartitioning(
                 lex_ordering,
                 num_output_partitions,
-                sample_size,
+                row_converter,
+                bounds,
             ) => {
                 let mut scratch = std::mem::take(&mut self.scratch);
                 let (partition_starts, partition_row_indices): (&Vec<u32>, &Vec<u32>) = {
@@ -1764,37 +1763,20 @@ impl CelebornMultiPartitionShuffleRepartitioner {
 
                     let num_rows = arrays[0].len();
 
-                    // If necessary (i.e., when first batch arrives) generate the bounds (as Rows)
-                    // for range partitioning based on randomly reservoir sampling the batch.
-                    if self.row_converter.is_none() {
-                        let (bounds_rows, row_converter) = RangePartitioner::generate_bounds(
-                            &arrays,
-                            lex_ordering,
-                            *num_output_partitions,
-                            input.num_rows(),
-                            *sample_size,
-                            self.seed,
-                        )?;
-
-                        self.bounds_rows =
-                            Some(bounds_rows.iter().map(|row| row.owned()).collect_vec());
-                        self.row_converter = Some(row_converter);
-                    }
-
                     // Generate partition ids for every row, first by converting the partition
                     // arrays to Rows, and then doing binary search for each Row against the
                     // bounds Rows.
-                    let row_batch = self
-                        .row_converter
-                        .as_ref()
-                        .unwrap()
-                        .convert_columns(arrays.as_slice())?;
+                    {
+                        let row_batch = row_converter.convert_columns(arrays.as_slice())?;
+                        let partition_ids = &mut scratch.partition_ids[..num_rows];
 
-                    RangePartitioner::partition_indices_for_batch(
-                        &row_batch,
-                        self.bounds_rows.as_ref().unwrap().as_slice(),
-                        &mut scratch.partition_ids[..num_rows],
-                    );
+                        row_batch.iter().enumerate().for_each(|(row_idx, row)| {
+                            partition_ids[row_idx] = bounds
+                                .as_slice()
+                                .partition_point(|bound| bound.row() <= row)
+                                as u32
+                        });
+                    }
 
                     // We now have partition ids for every input row, map that to partition starts
                     // and partition indices to eventually right these rows to partition buffers.
