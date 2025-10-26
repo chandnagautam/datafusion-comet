@@ -195,7 +195,7 @@ final class CometCelebornBypassMergeSortWriter<K, V> extends ShuffleWriter<K, V>
               mapId,
               (int) taskContext.taskAttemptId(),
               i,
-              handle.dependency().rdd().getNumPartitions(),
+              handle.numMappers(),
               partitionNum);
       partitionWriters[i] = writer;
     }

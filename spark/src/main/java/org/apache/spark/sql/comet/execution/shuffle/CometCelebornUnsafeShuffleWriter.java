@@ -44,7 +44,6 @@ import org.apache.spark.memory.TaskMemoryManager;
 import org.apache.spark.scheduler.MapStatus;
 import org.apache.spark.serializer.SerializationStream;
 import org.apache.spark.serializer.SerializerInstance;
-import org.apache.spark.shuffle.BaseShuffleHandle;
 import org.apache.spark.shuffle.ShuffleWriteMetricsReporter;
 import org.apache.spark.shuffle.ShuffleWriter;
 import org.apache.spark.shuffle.celeborn.SparkUtils;
@@ -105,7 +104,7 @@ final class CometCelebornUnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
 
   CometCelebornUnsafeShuffleWriter(
       TaskMemoryManager memoryManager,
-      BaseShuffleHandle<K, V, V> handle,
+      CometCelebornSerializedShuffleHandle<K, V> handle,
       int mapId,
       TaskContext taskContext,
       SparkConf conf,
@@ -131,7 +130,7 @@ final class CometCelebornUnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
     this.tracingEnabled = (boolean) CometConf.COMET_TRACING_ENABLED().get();
     this.celebornShuffleId = celebornShuffleId;
     this.partitionNum = this.partitioner.numPartitions();
-    this.numMapper = dep.rdd().getNumPartitions();
+    this.numMapper = handle.numMappers();
     this.shuffleClient = shuffleClient;
   }
 

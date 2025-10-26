@@ -51,7 +51,7 @@ use futures::executor::block_on;
 use futures::{StreamExt, TryFutureExt, TryStreamExt};
 use itertools::Itertools;
 use jni::objects::{GlobalRef, JObject};
-use log::info;
+use log::debug;
 use std::borrow::Borrow;
 use std::io::{Cursor, Error, SeekFrom};
 use std::panic;
@@ -1286,7 +1286,7 @@ impl Write for CelebornWriter {
 
             env.set_byte_array_region(&buffer, 0, &*(buf as *const [u8] as *const [i8]))?;
 
-            info!(
+            debug!(
                 "Num mappers: {}, num partitions: {}, shuffle id: {}, partition id: {}, map id: {}, attempt_id: {}",
                 self.num_mappers,
                 self.num_partitions,
