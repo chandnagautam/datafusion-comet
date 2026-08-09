@@ -855,6 +855,29 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
     icebergScanBuilder.setCommon(commonBuilder.build())
     // partition field intentionally empty - will be populated at execution time
 
+    // Extract sort order tag if present and match with table sort order
+    val parentSortOrderOpt =
+      scan.getTagValue(org.apache.comet.rules.CometScanRule.ICEBERG_SORT_ORDER_TAG)
+    val tableSortOrderOpt = scan.nativeIcebergScanMetadata.flatMap { metadata =>
+      org.apache.comet.iceberg.IcebergReflection.getSortOrder(metadata, scan.output)
+    }
+
+    val matchingSortOrder = for {
+      parentSortOrder <- parentSortOrderOpt
+      tableSortOrder <- tableSortOrderOpt
+      if sortOrdersMatch(parentSortOrder, tableSortOrder)
+    } yield tableSortOrder
+
+    matchingSortOrder.foreach { sortOrders =>
+      sortOrders
+        .flatMap { so =>
+          org.apache.comet.serde.QueryPlanSerde.exprToProto(so, scan.output)
+        }
+        .foreach { protoExpr =>
+          icebergScanBuilder.addSortOrder(protoExpr)
+        }
+    }
+
     builder.clearChildren()
     Some(builder.setIcebergScan(icebergScanBuilder).build())
   }
@@ -1011,7 +1034,61 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
               val tasksCollection =
                 tasksMethod.invoke(taskGroup).asInstanceOf[java.util.Collection[_]]
 
-              tasksCollection.asScala.foreach { task =>
+              // Extract physical table sort order to sort tasks by statistics
+              val tableSortOrderOpt =
+                org.apache.comet.iceberg.IcebergReflection.getSortOrder(metadata, scanExec.output)
+              val sortColumnFieldIdOpt = tableSortOrderOpt
+                .flatMap(_.headOption)
+                .flatMap { firstSortOrder =>
+                  val attrName = firstSortOrder.child.collectFirst { case attr: Attribute =>
+                    attr.name
+                  }
+                  attrName.flatMap(metadata.globalFieldIdMapping.get)
+                }
+
+              val sortedTasks = sortColumnFieldIdOpt
+                .flatMap { fieldId =>
+                  try {
+                    val tableSchema = metadata.tableSchema
+                    val findTypeMethod = tableSchema.getClass.getMethod("findType", classOf[Int])
+                    val icebergType =
+                      findTypeMethod.invoke(tableSchema, java.lang.Integer.valueOf(fieldId))
+
+                    val tasksWithValues = tasksCollection.asScala.map { task =>
+                      val valueOpt = org.apache.comet.iceberg.IcebergReflection
+                        .getSortColumnValue(task, fieldId, icebergType)
+                      task -> valueOpt
+                    }.toSeq
+
+                    // Find if sorting direction is Descending
+                    val isDescending = tableSortOrderOpt
+                      .flatMap(_.headOption)
+                      .exists(_.direction == org.apache.spark.sql.catalyst.expressions.Descending)
+
+                    // Sort tasks. Tasks without statistics are placed at the end.
+                    val sorted = tasksWithValues
+                      .sortWith { case ((t1, v1), (t2, v2)) =>
+                        (v1, v2) match {
+                          case (Some(val1), Some(val2)) =>
+                            val comp = val1.compareTo(val2)
+                            if (isDescending) comp > 0 else comp < 0
+                          case (Some(_), None) => true
+                          case (None, Some(_)) => false
+                          case (None, None) => false
+                        }
+                      }
+                      .map(_._1)
+
+                    Some(sorted)
+                  } catch {
+                    case e: Exception =>
+                      logWarning(s"Failed to sort Iceberg tasks by statistics: ${e.getMessage}")
+                      None
+                  }
+                }
+                .getOrElse(tasksCollection.asScala.toSeq)
+
+              sortedTasks.foreach { task =>
                 totalTasks += 1
 
                 val taskBuilder = OperatorOuterClass.IcebergFileScanTask.newBuilder()
@@ -1317,5 +1394,17 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
     // Pass BatchScanExec reference for deferred serialization (DPP support)
     // Serialization happens at execution time after doPrepare() resolves DPP subqueries
     CometIcebergNativeScanExec(nativeOp, op.wrapped, op.session, metadataLocation, metadata)
+  }
+
+  private def sortOrdersMatch(
+      queryOrders: Seq[SortOrder],
+      tableOrders: Seq[SortOrder]): Boolean = {
+    if (queryOrders.length > tableOrders.length) {
+      return false
+    }
+    queryOrders.zip(tableOrders).forall { case (q, t) =>
+      q.child.semanticEquals(
+        t.child) && q.direction == t.direction && q.nullOrdering == t.nullOrdering
+    }
   }
 }

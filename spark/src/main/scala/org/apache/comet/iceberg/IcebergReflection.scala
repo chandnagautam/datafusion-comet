@@ -25,6 +25,8 @@ import java.util.concurrent.ConcurrentHashMap
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 
+import org.apache.comet.iceberg.IcebergReflection.ClassNames
+import org.apache.comet.iceberg.IcebergReflection.tryLoadClass
 import org.apache.comet.util.ClassLoaders
 
 /**
@@ -1033,6 +1035,101 @@ object IcebergReflection extends Logging {
     getTableProperties(table).filter(_.containsKey("encryption.key-id")).map { props =>
       Option(props.get("encryption.data-key-length")).map(_.toInt).getOrElse(16)
     }
+
+  def getSortOrder(
+      metadata: CometIcebergNativeScanMetadata,
+      output: Seq[org.apache.spark.sql.catalyst.expressions.Attribute])
+      : Option[Seq[org.apache.spark.sql.catalyst.expressions.SortOrder]] = {
+    try {
+      val table = metadata.table
+      val sortOrder = table.getClass.getMethod("sortOrder").invoke(table)
+      val isSorted =
+        sortOrder.getClass.getMethod("isSorted").invoke(sortOrder).asInstanceOf[Boolean]
+      if (!isSorted) {
+        return None
+      }
+
+      // Map from field ID (Int) to Spark Attribute
+      val fieldIdToAttribute = output.flatMap { attr =>
+        metadata.globalFieldIdMapping.get(attr.name).map { fieldId =>
+          fieldId -> attr
+        }
+      }.toMap
+
+      import scala.collection.JavaConverters._
+      val fields =
+        sortOrder.getClass.getMethod("fields").invoke(sortOrder).asInstanceOf[java.util.List[_]]
+      val sparkSortOrders = fields.asScala.flatMap { field =>
+        val sourceId = field.getClass.getMethod("sourceId").invoke(field).asInstanceOf[Int]
+
+        fieldIdToAttribute.get(sourceId).map { attr =>
+          val directionStr = field.getClass.getMethod("direction").invoke(field).toString
+          val nullOrderStr = field.getClass.getMethod("nullOrder").invoke(field).toString
+
+          val direction = if (directionStr == "DESC") {
+            org.apache.spark.sql.catalyst.expressions.Descending
+          } else {
+            org.apache.spark.sql.catalyst.expressions.Ascending
+          }
+
+          val nullOrdering = if (nullOrderStr == "NULLS_LAST") {
+            org.apache.spark.sql.catalyst.expressions.NullsLast
+          } else {
+            org.apache.spark.sql.catalyst.expressions.NullsFirst
+          }
+
+          org.apache.spark.sql.catalyst.expressions
+            .SortOrder(attr, direction, nullOrdering, Seq.empty)
+        }
+      }
+
+      if (sparkSortOrders.nonEmpty) {
+        Some(sparkSortOrders.toSeq)
+      } else {
+        None
+      }
+    } catch {
+      case e: Exception =>
+        logError(s"Failed to extract sort order from Iceberg table: ${e.getMessage}")
+        None
+    }
+  }
+
+  def getSortColumnValue(
+      task: Any,
+      fieldId: Int,
+      icebergType: AnyRef): Option[Comparable[Any]] = {
+    try {
+      val contentScanTaskClass = tryLoadClass(ClassNames.CONTENT_SCAN_TASK).get
+      val contentFileClass = tryLoadClass(ClassNames.CONTENT_FILE).get
+
+      val dataFile = getMethod(contentScanTaskClass, "file").invoke(task)
+      val lowerBounds = getMethod(contentFileClass, "lowerBounds")
+        .invoke(dataFile)
+        .asInstanceOf[java.util.Map[Integer, java.nio.ByteBuffer]]
+
+      if (lowerBounds != null && lowerBounds.containsKey(fieldId)) {
+        val buffer = lowerBounds.get(fieldId)
+        val conversionsClass = loadClass("org.apache.iceberg.types.Conversions")
+        val typeClass = loadClass("org.apache.iceberg.types.Type")
+        val fromByteBufferMethod =
+          getMethod(conversionsClass, "fromByteBuffer", typeClass, classOf[java.nio.ByteBuffer])
+
+        val value = fromByteBufferMethod.invoke(null, icebergType, buffer)
+        if (value != null && value.isInstanceOf[Comparable[_]]) {
+          Some(value.asInstanceOf[Comparable[Any]])
+        } else {
+          None
+        }
+      } else {
+        None
+      }
+    } catch {
+      case e: Exception =>
+        logWarning(s"Failed to extract lower bound value for sort column: ${e.getMessage}")
+        None
+    }
+  }
 }
 
 /**

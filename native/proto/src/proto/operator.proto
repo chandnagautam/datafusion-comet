@@ -312,6 +312,9 @@ message IcebergScan {
 
   // Single partition's file scan tasks
   repeated IcebergFileScanTask file_scan_tasks = 2;
+
+  // Serialized SortOrder expressions from the scan ordering
+  repeated spark.spark_expression.Expr sort_order = 3;
 }
 
 // Helper message for deduplicating field ID lists

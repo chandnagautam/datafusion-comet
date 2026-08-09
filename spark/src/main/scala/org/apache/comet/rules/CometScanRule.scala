@@ -975,6 +975,12 @@ object CometScanRule extends Logging {
   val SKIP_COMET_SCAN_TAG: org.apache.spark.sql.catalyst.trees.TreeNodeTag[Unit] =
     org.apache.spark.sql.catalyst.trees.TreeNodeTag[Unit]("comet.skipCometScan")
 
+  val ICEBERG_SORT_ORDER_TAG: org.apache.spark.sql.catalyst.trees.TreeNodeTag[Seq[
+    org.apache.spark.sql.catalyst.expressions.SortOrder]] =
+    org.apache.spark.sql.catalyst.trees
+      .TreeNodeTag[Seq[org.apache.spark.sql.catalyst.expressions.SortOrder]](
+        "comet.iceberg.sortOrder")
+
   /**
    * Single-pass validation of Iceberg FileScanTasks.
    *

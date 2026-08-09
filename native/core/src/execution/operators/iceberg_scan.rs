@@ -28,7 +28,7 @@ use arrow::datatypes::SchemaRef;
 use datafusion::common::{DataFusionError, Result as DFResult};
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::expressions::Column;
-use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
+use datafusion::physical_expr::{EquivalenceProperties, LexOrdering, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
@@ -98,9 +98,10 @@ impl IcebergScanExec {
         catalog_name: String,
         tasks: Vec<FileScanTask>,
         data_file_concurrency_limit: usize,
+        sort_order: Option<LexOrdering>,
     ) -> Result<Self, ExecutionError> {
         let output_schema = schema;
-        let plan_properties = Self::compute_properties(Arc::clone(&output_schema), 1);
+        let plan_properties = Self::compute_properties(Arc::clone(&output_schema), 1, sort_order);
 
         let metrics = ExecutionPlanMetricsSet::new();
 
@@ -116,9 +117,18 @@ impl IcebergScanExec {
         })
     }
 
-    fn compute_properties(schema: SchemaRef, num_partitions: usize) -> Arc<PlanProperties> {
+    fn compute_properties(
+        schema: SchemaRef,
+        num_partitions: usize,
+        sort_order: Option<LexOrdering>,
+    ) -> Arc<PlanProperties> {
+        let eq_properties = if let Some(ordering) = sort_order {
+            EquivalenceProperties::new_with_orderings(schema, vec![ordering])
+        } else {
+            EquivalenceProperties::new(schema)
+        };
         Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(schema),
+            eq_properties,
             Partitioning::UnknownPartitioning(num_partitions),
             EmissionType::Incremental,
             Boundedness::Bounded,
@@ -186,7 +196,14 @@ impl IcebergScanExec {
         // iceberg runtime alongside the reads, not on the calling executor thread (see
         // fill_delete_file_sizes).
         let fill_io = file_io.clone();
-        let concurrency_limit = self.data_file_concurrency_limit;
+        // If there is an output ordering, force sequential reads (concurrency limit = 1)
+        // to preserve the sorted task order in the output record batches.
+        let concurrency_limit = if self.plan_properties.output_ordering().is_some() {
+            1
+        } else {
+            self.data_file_concurrency_limit
+        };
+
         let task_stream = futures::stream::once(async move {
             let mut tasks = tasks;
             Self::fill_delete_file_sizes(&mut tasks, &fill_io, concurrency_limit).await?;
@@ -209,7 +226,7 @@ impl IcebergScanExec {
         };
         let reader = iceberg::arrow::ArrowReaderBuilder::new(file_io, iceberg_runtime)
             .with_batch_size(batch_size)
-            .with_data_file_concurrency_limit(self.data_file_concurrency_limit)
+            .with_data_file_concurrency_limit(concurrency_limit)
             .with_row_selection_enabled(true)
             .with_metadata_size_hint(512 * 1024) // Same as DataFusion's default
             .build();

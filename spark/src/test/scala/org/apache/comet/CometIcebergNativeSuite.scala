@@ -5543,4 +5543,56 @@ class CometIcebergNativeSuite
       }
     }
   }
+
+  test("Iceberg sort pushdown and ordering propagation") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+
+    withTempIcebergDir { warehouseDir =>
+      withSQLConf(
+        "spark.sql.catalog.sort_cat" -> "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.sort_cat.type" -> "hadoop",
+        "spark.sql.catalog.sort_cat.warehouse" -> warehouseDir.getAbsolutePath,
+        "spark.sql.adaptive.enabled" -> "false",
+        CometConf.COMET_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_ENABLED.key -> "true",
+        CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
+
+        spark.sql("""
+          CREATE TABLE sort_cat.db.sort_test (
+            id INT,
+            name STRING,
+            value DOUBLE
+          ) USING iceberg
+        """)
+        val table =
+          org.apache.iceberg.spark.Spark3Util.loadIcebergTable(spark, "sort_cat.db.sort_test")
+        table.replaceSortOrder().asc("id").commit()
+
+        spark.sql("""
+          INSERT INTO sort_cat.db.sort_test VALUES
+          (3, 'Charlie', 30.7),
+          (1, 'Alice', 10.5),
+          (2, 'Bob', 20.3)
+        """)
+
+        val query = "SELECT * FROM sort_cat.db.sort_test ORDER BY id"
+        val (_, plan) = checkSparkAnswer(query)
+
+        // Verify that the plan contains a CometIcebergNativeScanExec
+        val scans = collectIcebergNativeScans(plan)
+        assert(scans.nonEmpty, "Expected CometIcebergNativeScanExec in physical plan")
+
+        // Verify that the scan propagates the sort order correctly in protobuf
+        val scan = scans.head
+        val protoScan = scan.nativeOp.getIcebergScan
+        assert(
+          protoScan.getSortOrderCount > 0,
+          "Expected sort order to be serialized in IcebergScan protobuf")
+        val protoSortOrder = protoScan.getSortOrder(0)
+        assert(protoSortOrder.hasSortOrder, "Expected serialized expression to be a SortOrder")
+
+        spark.sql("DROP TABLE sort_cat.db.sort_test")
+      }
+    }
+  }
 }

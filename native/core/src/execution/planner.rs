@@ -1757,6 +1757,17 @@ impl PhysicalPlanner {
                 let tasks = parse_file_scan_tasks_from_common(common, &scan.file_scan_tasks)?;
                 let data_file_concurrency_limit = common.data_file_concurrency_limit as usize;
 
+                let sort_order = if !scan.sort_order.is_empty() {
+                    let exprs: Result<Vec<PhysicalSortExpr>, ExecutionError> = scan
+                        .sort_order
+                        .iter()
+                        .map(|expr| self.create_sort_expr(expr, Arc::clone(&required_schema)))
+                        .collect();
+                    Some(LexOrdering::new(exprs?).unwrap())
+                } else {
+                    None
+                };
+
                 let iceberg_scan = IcebergScanExec::new(
                     metadata_location,
                     required_schema,
@@ -1764,6 +1775,7 @@ impl PhysicalPlanner {
                     catalog_name,
                     tasks,
                     data_file_concurrency_limit,
+                    sort_order,
                 )?;
 
                 Ok((

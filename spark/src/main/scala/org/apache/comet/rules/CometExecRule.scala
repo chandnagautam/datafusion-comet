@@ -600,6 +600,27 @@ case class CometExecRule(session: SparkSession)
       // corresponding Final aggregate cannot be converted and the intermediate buffer
       // formats are incompatible. This runs before transform() so the tags are checked
       // during the bottom-up conversion. Tags persist through AQE stage creation.
+      // Tag CometBatchScanExec that are under Sort/Limit before transform() runs
+      planWithJoinRewritten.foreach {
+        case sort: org.apache.spark.sql.execution.SortExec =>
+          sort.child.foreach {
+            case scan: CometBatchScanExec =>
+              scan.setTagValue(
+                org.apache.comet.rules.CometScanRule.ICEBERG_SORT_ORDER_TAG,
+                sort.sortOrder)
+            case _ =>
+          }
+        case limitSort: org.apache.spark.sql.execution.TakeOrderedAndProjectExec =>
+          limitSort.child.foreach {
+            case scan: CometBatchScanExec =>
+              scan.setTagValue(
+                org.apache.comet.rules.CometScanRule.ICEBERG_SORT_ORDER_TAG,
+                limitSort.sortOrder)
+            case _ =>
+          }
+        case _ =>
+      }
+
       tagUnsafePartialAggregates(planWithJoinRewritten)
 
       var newPlan = transform(planWithJoinRewritten)
