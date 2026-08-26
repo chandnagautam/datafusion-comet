@@ -311,6 +311,12 @@ under the License.
         <groupId>org.apache.spark</groupId>
         <artifactId>spark-core_${scala.binary.version}</artifactId>
         <version>${spark.version}</version>
+        <scope>${spark.maven.scope}</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.spark</groupId>
+        <artifactId>spark-core_${scala.binary.version}</artifactId>
+        <version>${spark.version}</version>
         <classifier>tests</classifier>
         <scope>test</scope>
         <exclusions>
