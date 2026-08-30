@@ -55,6 +55,29 @@ object BubbleSchedulingConf {
       .intConf
       .createWithDefault(2)
 
+  val UPSTREAM_CORE_FRACTION =
+    ConfigBuilder("spark.shuffle.bubble.upstreamCoreFraction")
+      .doc("Fraction of cluster cores reserved exclusively for upstream mapper tasks " +
+        "to prevent downstream tasks from deadlocking the scheduler.")
+      .version("1.1.0")
+      .doubleConf
+      .createWithDefault(0.5)
+
+  val MAX_ACTIVE_DOWNSTREAM_TASKS =
+    ConfigBuilder("spark.shuffle.bubble.maxActiveDownstreamTasks")
+      .doc("Hard cap on the number of concurrently dispatched downstream tasks. " +
+        "When set to 0, dynamically calculated from total cluster cores and upstreamCoreFraction.")
+      .version("1.1.0")
+      .intConf
+      .createWithDefault(0)
+
+  val READER_POLL_TIMEOUT_MS =
+    ConfigBuilder("spark.shuffle.bubble.readerPollTimeoutMs")
+      .doc("Polling wait timeout in milliseconds for active streaming shuffle readers.")
+      .version("1.1.0")
+      .timeConf(java.util.concurrent.TimeUnit.MILLISECONDS)
+      .createWithDefault(100L)
+
   val AQE_SAMPLING_MIN_FRACTION =
     ConfigBuilder("spark.shuffle.bubble.aqe.sampling.minFraction")
       .doc("Minimum fraction of finished mapper tasks to sample for progressive AQE " +
@@ -85,5 +108,17 @@ object BubbleSchedulingConf {
 
   def getMaxConcurrentStages(conf: SparkConf): Int = {
     conf.get(MAX_CONCURRENT_STAGES)
+  }
+
+  def getUpstreamCoreFraction(conf: SparkConf): Double = {
+    conf.get(UPSTREAM_CORE_FRACTION)
+  }
+
+  def getMaxActiveDownstreamTasks(conf: SparkConf): Int = {
+    conf.get(MAX_ACTIVE_DOWNSTREAM_TASKS)
+  }
+
+  def getReaderPollTimeoutMs(conf: SparkConf): Long = {
+    conf.get(READER_POLL_TIMEOUT_MS)
   }
 }

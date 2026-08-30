@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password
+    command: server /data --console-address ":9001"
+    networks:
+      - polaris-network
+
+  minio-mc:
+    image: docker.io/minio/mc:latest
+    container_name: minio-mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc alias set local http://minio:9000 admin password) do echo 'Waiting for MinIO...' && sleep 1; done;
+      if ! /usr/bin/mc ls local/warehouse >/dev/null 2>&1; then
+        /usr/bin/mc mb local/warehouse;
+        /usr/bin/mc policy set public local/warehouse;
+        echo 'Bucket \"warehouse\" created.';
+      else
+        echo 'Bucket \"warehouse\" already exists.';
+      fi;
+      exit 0;
+      "
+    networks:
+      - polaris-network
+
+  polaris:
+    image: docker.io/apache/polaris:latest
+    container_name: polaris
+    ports:
+      - "8181:8181"
+    environment:
+      - POLARIS_BOOTSTRAP_CREDENTIALS=POLARIS,admin,password
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+    depends_on:
+      - minio
+    networks:
+      - polaris-network
+
+  celeborn-master:
+    image: docker.io/apache/celeborn:0.7.0
+    container_name: celeborn-master
+    ports:
+      - "9097:9097"
+      - "9098:9098"
+    environment:
+      - CELEBORN_MASTER_HOST=celeborn-master
+      - CELEBORN_MASTER_PORT=9097
+    networks:
+      - polaris-network
+
+  celeborn-worker:
+    image: docker.io/apache/celeborn:0.7.0
+    container_name: celeborn-worker
+    ports:
+      - "9096:9096"
+    environment:
+      - CELEBORN_MASTER_HOST=celeborn-master
+      - CELEBORN_MASTER_PORT=9097
+      - CELEBORN_STORAGE_LOCAL_DIRS=/tmp/celeborn
+    depends_on:
+      - celeborn-master
+    networks:
+      - polaris-network
+
+networks:
+  polaris-network:
+    name: polaris-network

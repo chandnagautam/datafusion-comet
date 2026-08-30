@@ -20,7 +20,7 @@
 package org.apache.spark.scheduler
 
 import scala.collection.mutable
-import scala.collection.mutable.{ArrayBuffer, HashSet}
+import scala.collection.mutable.{ArrayBuffer, HashSet, Queue}
 
 import org.apache.spark.{JobArtifactSet, MapOutputTrackerMaster, SparkContext, SparkEnv}
 import org.apache.spark.broadcast.Broadcast
@@ -31,14 +31,17 @@ import org.apache.spark.util.{Clock, SystemClock}
 
 /**
  * BubbleDAGScheduler extends Spark's [[DAGScheduler]] to support Bubble Scheduling with Remote
- * Shuffle Services (e.g. Apache Celeborn).
+ * Shuffle Services (e.g. Apache Celeborn) and Active Streaming Shuffle Reads.
  *
  * Key behaviors:
- *   1. Allows downstream stages to launch ready partition tasks without waiting for the entire
- *      upstream stage to complete. 2. Evaluates downstream partition readiness progressively once
- *      a configurable fraction of upstream tasks finish. 3. Falls back to stage-barrier execution
- *      if the upstream task count is below the minimum threshold. 4. Cancels and reschedules
- *      active downstream tasks if an upstream mapper fails and retries.
+ *   1. Bounded Sliding Window Dispatch: Dispatches only a budgeted window W of downstream tasks
+ *      to prevent overwhelming the scheduler and exhausting cluster CPU cores. 2. Progressive
+ *      Downstream Activation: Evaluates and launches the initial window of downstream tasks once
+ *      a configurable fraction of upstream mappers finish. 3. Continuous Sliding Dispatch: As
+ *      downstream tasks finish their partition processing, the next pending partitions in the
+ *      queue are submitted immediately. 4. Deadlock Prevention: Guarantees a minimum core
+ *      reservation for upstream mappers. 5. Fail-Fast Reschedule: Cancels active downstream tasks
+ *      if an upstream mapper fails and retries.
  */
 class BubbleDAGScheduler(
     sc: SparkContext,
@@ -62,19 +65,26 @@ class BubbleDAGScheduler(
 
   private val closureSerializerInstance: SerializerInstance = env.closureSerializer.newInstance()
 
-  // Stage ID -> Set of completed mapper partition IDs
+  // Stage ID -> BitSet of completed mapper partition IDs
   private val stageCompletedPartitions = new mutable.HashMap[Int, mutable.BitSet]()
 
-  // Child Stage ID -> Set of submitted partition IDs
+  // Child Stage ID -> BitSet of submitted partition IDs
   private val stageSubmittedPartitions = new mutable.HashMap[Int, mutable.BitSet]()
 
-  // Parent Stage ID -> Set of dependent child stage IDs
+  // Child Stage ID -> Queue of pending partition IDs waiting for a slot in the sliding window
+  private val stagePendingPartitionsQueue = new mutable.HashMap[Int, mutable.Queue[Int]]()
+
+  // Child Stage ID -> Number of currently active (in-flight) tasks
+  private val stageActiveTasksCount = new mutable.HashMap[Int, Int]()
+
+  // Parent Stage ID -> Set of dependent child stages
   private val stageToChildStages = new mutable.HashMap[Int, mutable.HashSet[Stage]]()
 
-  // Track active submitted task IDs per child stage for fail-fast cancellation
-  // Stage ID -> Map[PartitionId, Seq[Long]]
+  // Stage ID -> Map[PartitionId, Seq[Long]] (track active task IDs for cancellation)
   private val stageRunningTaskIds =
     new mutable.HashMap[Int, mutable.HashMap[Int, ArrayBuffer[Long]]]()
+
+  private val testStageIdGenerator = new java.util.concurrent.atomic.AtomicInteger(0)
 
   /**
    * Check if bubble scheduling is enabled and stage meets minimum task count criteria.
@@ -94,7 +104,23 @@ class BubbleDAGScheduler(
   }
 
   /**
-   * Check if downstream child stage can start dispatching ready partition tasks.
+   * Calculates the maximum number of downstream tasks allowed to run concurrently in the sliding
+   * window W to prevent deadlock and core saturation.
+   */
+  def computeMaxActiveDownstreamTasks(childStage: Stage): Int = {
+    val explicitCap = BubbleSchedulingConf.getMaxActiveDownstreamTasks(conf)
+    if (explicitCap > 0) {
+      return math.min(childStage.numPartitions, explicitCap)
+    }
+
+    val totalCores = math.max(1, sc.defaultParallelism)
+    val upstreamFraction = BubbleSchedulingConf.getUpstreamCoreFraction(conf)
+    val downstreamCores = math.max(1, ((1.0 - upstreamFraction) * totalCores).toInt)
+    math.min(childStage.numPartitions, downstreamCores)
+  }
+
+  /**
+   * Check if downstream child stage can start dispatching its sliding window of tasks.
    */
   private def canProgressivelyDispatch(parentStage: ShuffleMapStage): Boolean = {
     if (!isBubbleSchedulingEligible(parentStage)) {
@@ -108,8 +134,7 @@ class BubbleDAGScheduler(
   }
 
   /**
-   * Register a completed mapper partition and check if any child stages have ready partitions to
-   * submit.
+   * Register a completed mapper partition and trigger downstream sliding window dispatch.
    */
   def onMapperTaskCompleted(stage: ShuffleMapStage, partitionId: Int): Unit = {
     val completedSet =
@@ -122,7 +147,8 @@ class BubbleDAGScheduler(
   }
 
   /**
-   * Evaluates child stages in waitingStages and dispatches ready partition tasks.
+   * Evaluates child stages in waitingStages or runningStages and dispatches the next window of
+   * ready partitions.
    */
   private def checkAndSubmitReadyChildPartitions(parentStage: ShuffleMapStage): Unit = {
     val children = stageToChildStages.getOrElse(parentStage.id, Set.empty[Stage])
@@ -133,49 +159,49 @@ class BubbleDAGScheduler(
   }
 
   /**
-   * Determines which partitions of the child stage have their dependencies satisfied and submits
-   * them.
+   * Dispatches tasks for the child stage within the bounded concurrency window W.
    */
-  private def dispatchReadyPartitionsForChild(
-      parentStage: ShuffleMapStage,
-      childStage: Stage): Unit = {
-    val alreadySubmitted = stageSubmittedPartitions.getOrElseUpdate(
+  def dispatchReadyPartitionsForChild(parentStage: ShuffleMapStage, childStage: Stage): Unit = {
+    val maxActive = computeMaxActiveDownstreamTasks(childStage)
+    val currentActive = stageActiveTasksCount.getOrElse(childStage.id, 0)
+    val availableSlots = maxActive - currentActive
+
+    if (availableSlots <= 0) {
+      return
+    }
+
+    val pendingQueue = stagePendingPartitionsQueue.getOrElseUpdate(
+      childStage.id, {
+        val q = new mutable.Queue[Int]()
+        val submitted = stageSubmittedPartitions.getOrElseUpdate(
+          childStage.id,
+          new mutable.BitSet(childStage.numPartitions))
+        for (p <- 0 until childStage.numPartitions if !submitted.contains(p)) {
+          q.enqueue(p)
+        }
+        q
+      })
+
+    val partitionsToDispatch = new ArrayBuffer[Int]()
+    val submittedSet = stageSubmittedPartitions.getOrElseUpdate(
       childStage.id,
       new mutable.BitSet(childStage.numPartitions))
-    val readyPartitions = new ArrayBuffer[Int]()
 
-    for (p <- 0 until childStage.numPartitions if !alreadySubmitted.contains(p)) {
-      if (isChildPartitionReady(parentStage, childStage, p)) {
-        readyPartitions += p
-        alreadySubmitted.add(p)
+    while (partitionsToDispatch.size < availableSlots && pendingQueue.nonEmpty) {
+      val p = pendingQueue.dequeue()
+      if (!submittedSet.contains(p)) {
+        partitionsToDispatch += p
+        submittedSet.add(p)
       }
     }
 
-    if (readyPartitions.nonEmpty) {
+    if (partitionsToDispatch.nonEmpty) {
+      stageActiveTasksCount(childStage.id) = currentActive + partitionsToDispatch.size
       logInfo(
-        s"Bubble scheduling: Dispatching ${readyPartitions.size} ready partitions for " +
-          s"child stage ${childStage.id} (parent: ${parentStage.id})")
-      submitReadyTasksForStage(childStage, readyPartitions.toSeq)
-    }
-  }
-
-  /**
-   * Check if a specific partition of the child stage has all required upstream mapper partitions
-   * completed.
-   */
-  private def isChildPartitionReady(
-      parentStage: ShuffleMapStage,
-      childStage: Stage,
-      childPartitionId: Int): Boolean = {
-    val completedMappers = stageCompletedPartitions.get(parentStage.id)
-    if (completedMappers.isEmpty) {
-      return false
-    }
-
-    val completedCount = completedMappers.get.size
-    completedCount == parentStage.numPartitions || {
-      val minFraction = BubbleSchedulingConf.getMinUpstreamCompletionFraction(conf)
-      (completedCount.toDouble / parentStage.numPartitions) >= minFraction
+        s"Bubble scheduling: Dispatching sliding window of ${partitionsToDispatch.size} " +
+          s"partitions for child stage ${childStage.id} (active: ${stageActiveTasksCount(
+              childStage.id)} / $maxActive)")
+      submitReadyTasksForStage(childStage, partitionsToDispatch.toSeq)
     }
   }
 
@@ -272,32 +298,102 @@ class BubbleDAGScheduler(
   }
 
   /**
+   * Intercepts task completion events from the DAGScheduler event process loop.
+   */
+  override private[scheduler] def handleTaskCompletion(event: CompletionEvent): Unit = {
+    val task = event.task
+    val stageId = task.stageId
+
+    event.reason match {
+      case org.apache.spark.Success =>
+        stageIdToStage.get(stageId).foreach {
+          case shuffleStage: ShuffleMapStage =>
+            onMapperTaskCompleted(shuffleStage, task.partitionId)
+            if (shuffleStage.pendingPartitions.isEmpty) {
+              cleanupBubbleStageState(shuffleStage.id)
+            }
+          case resultStage: ResultStage =>
+            // Decrement active task count and advance sliding window
+            val currentActive = stageActiveTasksCount.getOrElse(resultStage.id, 1)
+            stageActiveTasksCount(resultStage.id) = math.max(0, currentActive - 1)
+            advanceSlidingWindowOnTaskComplete(resultStage)
+
+            if (resultStage.findMissingPartitions().isEmpty) {
+              cleanupBubbleStageState(resultStage.id)
+            }
+          case _ =>
+        }
+
+      case _: org.apache.spark.TaskFailedReason =>
+        stageIdToStage.get(stageId).foreach {
+          case shuffleStage: ShuffleMapStage =>
+            onMapperTaskFailed(shuffleStage, task.partitionId)
+          case childStage =>
+            val currentActive = stageActiveTasksCount.getOrElse(childStage.id, 1)
+            stageActiveTasksCount(childStage.id) = math.max(0, currentActive - 1)
+        }
+
+      case _ =>
+    }
+
+    super.handleTaskCompletion(event)
+  }
+
+  /**
+   * Advances the sliding window by submitting the next unsubmitted partition when a task
+   * completes.
+   */
+  private def advanceSlidingWindowOnTaskComplete(childStage: Stage): Unit = {
+    val pendingQueue = stagePendingPartitionsQueue.get(childStage.id)
+    if (pendingQueue.isDefined && pendingQueue.get.nonEmpty) {
+      val nextPartition = pendingQueue.get.dequeue()
+      val submittedSet = stageSubmittedPartitions.getOrElseUpdate(
+        childStage.id,
+        new mutable.BitSet(childStage.numPartitions))
+      if (!submittedSet.contains(nextPartition)) {
+        submittedSet.add(nextPartition)
+        val currentActive = stageActiveTasksCount.getOrElse(childStage.id, 0)
+        stageActiveTasksCount(childStage.id) = currentActive + 1
+        logInfo(
+          s"Bubble scheduling: Advancing sliding window for stage ${childStage.id} " +
+            s"with next partition $nextPartition")
+        submitReadyTasksForStage(childStage, Seq(nextPartition))
+      }
+    }
+  }
+
+  /**
    * Fail-fast: Cancels active downstream child tasks if an upstream mapper task fails.
    */
   def onMapperTaskFailed(parentStage: ShuffleMapStage, failedPartitionId: Int): Unit = {
     logWarning(
       s"Upstream mapper partition $failedPartitionId failed in Stage " +
-        s"${parentStage.id}. Cancelling dependent downstream tasks.")
+        s"${parentStage.id}. Cancelling dependent downstream tasks in active window.")
 
     stageCompletedPartitions.get(parentStage.id).foreach(_.remove(failedPartitionId))
 
     val children = stageToChildStages.getOrElse(parentStage.id, Set.empty[Stage])
     for (childStage <- children) {
-      val runningTasks = stageRunningTaskIds.getOrElse(childStage.id, mutable.HashMap.empty)
-      for ((childPartId, taskIds) <- runningTasks if taskIds.nonEmpty) {
-        logInfo(
-          s"Cancelling task attempts $taskIds for child stage ${childStage.id} " +
-            s"partition $childPartId due to upstream mapper failure.")
-        taskScheduler.cancelTasks(
-          childStage.id,
-          false,
-          s"Upstream mapper partition $failedPartitionId in stage ${parentStage.id} failed.")
-        stageSubmittedPartitions.get(childStage.id).foreach(_.remove(childPartId))
-      }
+      taskScheduler.cancelTasks(
+        childStage.id,
+        false,
+        s"Upstream mapper partition $failedPartitionId in stage ${parentStage.id} failed.")
+      // Reset submitted state for pending reschedule
+      stageSubmittedPartitions.remove(childStage.id)
+      stageActiveTasksCount.remove(childStage.id)
+      stagePendingPartitionsQueue.remove(childStage.id)
     }
   }
 
-  private val testStageIdGenerator = new java.util.concurrent.atomic.AtomicInteger(0)
+  /**
+   * Intercepts stage cancellation to automatically clean up Bubble stage state.
+   */
+  override private[scheduler] def handleStageCancellation(
+      stageId: Int,
+      reason: Option[String] = None): Unit = {
+    cleanupBubbleStageState(stageId)
+    super.handleStageCancellation(stageId, reason)
+  }
 
   /**
    * Helper for creating a ShuffleMapStage for testing purposes.
@@ -326,57 +422,13 @@ class BubbleDAGScheduler(
   }
 
   /**
-   * Intercepts task completion events from the DAGScheduler event process loop.
-   */
-  override private[scheduler] def handleTaskCompletion(event: CompletionEvent): Unit = {
-    val task = event.task
-    val stageId = task.stageId
-
-    event.reason match {
-      case org.apache.spark.Success =>
-        stageIdToStage.get(stageId).foreach {
-          case shuffleStage: ShuffleMapStage =>
-            onMapperTaskCompleted(shuffleStage, task.partitionId)
-            // If all partitions have finished, clean up stage state
-            if (shuffleStage.pendingPartitions.isEmpty) {
-              cleanupBubbleStageState(shuffleStage.id)
-            }
-          case resultStage: ResultStage =>
-            if (resultStage.findMissingPartitions().isEmpty) {
-              cleanupBubbleStageState(resultStage.id)
-            }
-          case _ =>
-        }
-
-      case _: org.apache.spark.TaskFailedReason =>
-        stageIdToStage.get(stageId).foreach {
-          case shuffleStage: ShuffleMapStage =>
-            onMapperTaskFailed(shuffleStage, task.partitionId)
-          case _ =>
-        }
-
-      case _ =>
-    }
-
-    super.handleTaskCompletion(event)
-  }
-
-  /**
-   * Intercepts stage cancellation to automatically clean up Bubble stage state.
-   */
-  override private[scheduler] def handleStageCancellation(
-      stageId: Int,
-      reason: Option[String] = None): Unit = {
-    cleanupBubbleStageState(stageId)
-    super.handleStageCancellation(stageId, reason)
-  }
-
-  /**
    * Cleans up tracking metadata when a stage is marked finished or cancelled.
    */
   def cleanupBubbleStageState(stageId: Int): Unit = {
     stageCompletedPartitions.remove(stageId)
     stageSubmittedPartitions.remove(stageId)
+    stagePendingPartitionsQueue.remove(stageId)
+    stageActiveTasksCount.remove(stageId)
     stageToChildStages.remove(stageId)
     stageRunningTaskIds.remove(stageId)
   }
