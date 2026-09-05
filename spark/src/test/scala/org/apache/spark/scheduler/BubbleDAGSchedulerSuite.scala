@@ -171,4 +171,60 @@ class BubbleDAGSchedulerSuite extends SparkFunSuite with BeforeAndAfterEach {
     // State cleanup
     scheduler.cleanupBubbleStageState(stage.id)
   }
+
+  test(
+    "BubbleDAGScheduler: validates that bubble scheduling is happening (child starts before parent finishes)") {
+    val conf = new SparkConf()
+      .setMaster("local[4]")
+      .setAppName("BubbleValidationTest")
+      .set("spark.shuffle.bubble.enabled", "true")
+      .set("spark.shuffle.bubble.minUpstreamTasksThreshold", "10")
+      .set("spark.shuffle.bubble.minUpstreamCompletionFraction", "0.2")
+
+    sc = new SparkContext(conf)
+    val parentRDD = sc.parallelize(1 to 100, 10)
+    val childRDD = parentRDD.map(x => (x % 5, x))
+    val env = SparkEnv.get
+    val scheduler = new BubbleDAGScheduler(
+      sc,
+      sc.taskScheduler,
+      sc.listenerBus,
+      env.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster],
+      env.blockManager.master,
+      env,
+      new SystemClock())
+
+    val parentDep = new org.apache.spark.ShuffleDependency[Int, Int, Int](
+      parentRDD.map(x => (x, x)),
+      new org.apache.spark.HashPartitioner(10))
+    val parentStage = scheduler.createShuffleMapStageForTest(parentDep, 0)
+
+    val childStage = scheduler.createResultStageForTest(childRDD, 0, parents = List(parentStage))
+
+    // Initially, child stage is blocked in waitingStages
+    scheduler.waitingStages += childStage
+    assert(scheduler.waitingStages.contains(childStage))
+    assert(!scheduler.runningStages.contains(childStage))
+
+    // 1 task finishes (10% completion < 20% threshold): child stage should NOT start yet
+    scheduler.onMapperTaskCompleted(parentStage, 0)
+    assert(
+      scheduler.waitingStages.contains(childStage),
+      "Child stage should remain in waitingStages when below completion fraction threshold")
+    assert(!scheduler.runningStages.contains(childStage))
+
+    // 2nd task finishes (20% completion >= 20% threshold):
+    // BUBBLE SCHEDULING TRIGGERED!
+    // Downstream child stage is eagerly admitted to runningStages and dispatched
+    // while parent stage still has 8 out of 10 tasks pending!
+    scheduler.onMapperTaskCompleted(parentStage, 1)
+
+    assert(
+      scheduler.runningStages.contains(childStage),
+      "Bubble scheduling validation failed: Child stage was not admitted to runningStages while parent was still running")
+    assert(
+      !scheduler.waitingStages.contains(childStage),
+      "Child stage should have transitioned out of waitingStages into runningStages")
+    assert(parentStage.numPartitions === 10, "Parent stage must have 10 total partitions")
+  }
 }

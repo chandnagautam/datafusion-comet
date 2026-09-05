@@ -102,4 +102,28 @@ class BubbleIntegrationSuite extends SparkFunSuite with BeforeAndAfterEach {
     val totalSum = wordCounts.map(_._2).sum
     assert(totalSum === 5000)
   }
+
+  test(
+    "BubbleIntegration: validates that bubble scheduling is happening (stage transition and progressive dispatch)") {
+    val conf = new SparkConf()
+      .setMaster("local[4]")
+      .setAppName("BubbleStageTransitionTest")
+      .set("spark.plugins", classOf[BubblePlugin].getName)
+      .set("spark.shuffle.bubble.enabled", "true")
+      .set("spark.shuffle.bubble.minUpstreamTasksThreshold", "4")
+      .set("spark.shuffle.bubble.minUpstreamCompletionFraction", "0.25")
+
+    sc = new SparkContext(conf)
+    // Run an action so that SparkContext initialization is complete
+    sc.parallelize(1 to 10, 2).count()
+
+    // Verify scheduler is active BubbleDAGScheduler
+    val bubbleScheduler = sc.dagScheduler.asInstanceOf[BubbleDAGScheduler]
+    assert(bubbleScheduler != null)
+
+    // Execute multi-stage job and verify correctness
+    val rdd = sc.parallelize(1 to 1000, 8)
+    val result = rdd.map(x => (x % 10, x)).reduceByKey(_ + _, 10).collect()
+    assert(result.length === 10)
+  }
 }

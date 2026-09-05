@@ -80,10 +80,6 @@ class BubbleDAGScheduler(
   // Parent Stage ID -> Set of dependent child stages
   private val stageToChildStages = new mutable.HashMap[Int, mutable.HashSet[Stage]]()
 
-  // Stage ID -> Map[PartitionId, Seq[Long]] (track active task IDs for cancellation)
-  private val stageRunningTaskIds =
-    new mutable.HashMap[Int, mutable.HashMap[Int, ArrayBuffer[Long]]]()
-
   private val testStageIdGenerator = new java.util.concurrent.atomic.AtomicInteger(0)
 
   /**
@@ -147,11 +143,32 @@ class BubbleDAGScheduler(
   }
 
   /**
+   * Register parent -> child stage dependency mapping.
+   */
+  def registerChildStage(parentId: Int, child: Stage): Unit = {
+    stageToChildStages.getOrElseUpdate(parentId, new mutable.HashSet[Stage]()).add(child)
+  }
+
+  /**
+   * Finds all child stages that depend on the given parent stage. Resolves from both the
+   * registered map and active stages in waitingStages, runningStages, and stageIdToStage.
+   */
+  def getChildStages(parentStage: ShuffleMapStage): Set[Stage] = {
+    val registered = stageToChildStages.getOrElse(parentStage.id, mutable.HashSet.empty[Stage])
+    val dynamic = (waitingStages ++ runningStages ++ stageIdToStage.values)
+      .filter(s => s.parents.exists(_.id == parentStage.id))
+    for (child <- dynamic) {
+      registerChildStage(parentStage.id, child)
+    }
+    (registered ++ dynamic).toSet
+  }
+
+  /**
    * Evaluates child stages in waitingStages or runningStages and dispatches the next window of
    * ready partitions.
    */
   private def checkAndSubmitReadyChildPartitions(parentStage: ShuffleMapStage): Unit = {
-    val children = stageToChildStages.getOrElse(parentStage.id, Set.empty[Stage])
+    val children = getChildStages(parentStage)
     for (childStage <- children
       if waitingStages.contains(childStage) || runningStages.contains(childStage)) {
       dispatchReadyPartitionsForChild(parentStage, childStage)
@@ -236,6 +253,16 @@ class BubbleDAGScheduler(
     val rdd = stage.rdd
     val locs = (0 until rdd.partitions.length).map(i => getPreferredLocs(rdd, i)).toArray
 
+    if (stage.latestInfo == null || stage.latestInfo.taskMetrics == null) {
+      stage.makeNewStageAttempt(rdd.partitions.length, locs.toSeq)
+    }
+
+    val taskMetrics = Option(stage.latestInfo)
+      .map(_.taskMetrics)
+      .filter(_ != null)
+      .getOrElse(new org.apache.spark.executor.TaskMetrics())
+    val serializedTaskMetrics = closureSerializerInstance.serialize(taskMetrics).array()
+
     stage match {
       case shuffleStage: ShuffleMapStage =>
         for (p <- readyPartitions if p < rdd.partitions.length) {
@@ -248,7 +275,7 @@ class BubbleDAGScheduler(
             locs(p),
             artifacts,
             new java.util.Properties(),
-            closureSerializerInstance.serialize(stage.latestInfo.taskMetrics).array(),
+            serializedTaskMetrics,
             Option(jobId),
             Option(sc.applicationId),
             sc.applicationAttemptId,
@@ -267,7 +294,7 @@ class BubbleDAGScheduler(
             p,
             artifacts,
             new java.util.Properties(),
-            closureSerializerInstance.serialize(stage.latestInfo.taskMetrics).array(),
+            serializedTaskMetrics,
             Option(jobId),
             Option(sc.applicationId),
             sc.applicationAttemptId,
@@ -372,7 +399,7 @@ class BubbleDAGScheduler(
 
     stageCompletedPartitions.get(parentStage.id).foreach(_.remove(failedPartitionId))
 
-    val children = stageToChildStages.getOrElse(parentStage.id, Set.empty[Stage])
+    val children = getChildStages(parentStage)
     for (childStage <- children) {
       taskScheduler.cancelTasks(
         childStage.id,
@@ -400,7 +427,8 @@ class BubbleDAGScheduler(
    */
   def createShuffleMapStageForTest(
       shuffleDep: org.apache.spark.ShuffleDependency[_, _, _],
-      jobId: Int): ShuffleMapStage = {
+      jobId: Int,
+      parents: List[Stage] = Nil): ShuffleMapStage = {
     val rdd = shuffleDep.rdd
     val numTasks = rdd.partitions.length
     val resourceProfileId = Option(rdd.getResourceProfile)
@@ -410,7 +438,7 @@ class BubbleDAGScheduler(
       testStageIdGenerator.getAndIncrement(),
       rdd,
       numTasks,
-      Nil,
+      parents,
       jobId,
       rdd.sparkContext.getCallSite(),
       shuffleDep,
@@ -418,6 +446,37 @@ class BubbleDAGScheduler(
       resourceProfileId)
     stageIdToStage(stage.id) = stage
     shuffleIdToMapStage(shuffleDep.shuffleId) = stage
+    for (p <- parents) {
+      registerChildStage(p.id, stage)
+    }
+    stage
+  }
+
+  /**
+   * Helper for creating a ResultStage for testing purposes.
+   */
+  def createResultStageForTest(
+      rdd: org.apache.spark.rdd.RDD[_],
+      jobId: Int,
+      parents: List[Stage] = Nil): ResultStage = {
+    val numTasks = rdd.partitions.length
+    val resourceProfileId = Option(rdd.getResourceProfile)
+      .map(_.id)
+      .getOrElse(org.apache.spark.resource.ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID)
+    val func = (_: org.apache.spark.TaskContext, it: Iterator[_]) => it.toArray
+    val stage = new ResultStage(
+      testStageIdGenerator.getAndIncrement(),
+      rdd,
+      func.asInstanceOf[(org.apache.spark.TaskContext, Iterator[_]) => _],
+      (0 until numTasks).toArray,
+      parents,
+      jobId,
+      rdd.sparkContext.getCallSite(),
+      resourceProfileId)
+    stageIdToStage(stage.id) = stage
+    for (p <- parents) {
+      registerChildStage(p.id, stage)
+    }
     stage
   }
 
@@ -430,6 +489,5 @@ class BubbleDAGScheduler(
     stagePendingPartitionsQueue.remove(stageId)
     stageActiveTasksCount.remove(stageId)
     stageToChildStages.remove(stageId)
-    stageRunningTaskIds.remove(stageId)
   }
 }
